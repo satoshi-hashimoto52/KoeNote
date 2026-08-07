@@ -1,0 +1,13 @@
+# --- Core (軽量: サーバ・ジョブ管理・テストに必要) ---
+fastapi
+uvicorn[standard]
+python-multipart
+psutil
+numpy
+
+# --- 文字起こし (大型: 実推論に必要。ローカル処理のみで OpenAI API 課金なし) ---
+# File Trans: openai-whisper + torch
+openai-whisper
+torch
+# Realtime: faster-whisper
+faster-whisper

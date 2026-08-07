@@ -1,0 +1,17 @@
+{
+  "initial_prompt": "この音声では、Claude Code、CLAUDE.md、カスタムコマンド、Rules、Hooks、Subagents、Skills、Codex、GitHubなどのソフトウェア開発用語が使用されます。",
+  "replacements": {
+    "クロードコード": "Claude Code",
+    "クロード コード": "Claude Code",
+    "クロード.md": "CLAUDE.md",
+    "クロードドットエムディー": "CLAUDE.md",
+    "ルールス": "Rules",
+    "フックス": "Hooks",
+    "サブエージェントス": "Subagents",
+    "サブエージェンツ": "Subagents",
+    "スキルス": "Skills",
+    "コードエックス": "Codex",
+    "ギットハブ": "GitHub"
+  },
+  "remove_fillers": false
+}
