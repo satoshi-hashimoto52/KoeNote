@@ -1,0 +1,55 @@
+{
+  "name": "bridgelog",
+  "productName": "BridgeLog",
+  "version": "0.1.0",
+  "private": true,
+  "description": "会議・セミナーの長時間文字起こしを行い、マイGPTへ渡す準備を整えるデスクトップアプリ",
+  "author": "hashimoto",
+  "type": "module",
+  "main": "electron/dist/main.cjs",
+  "scripts": {
+    "build:electron": "esbuild electron/main.ts electron/preload.ts --bundle --platform=node --format=cjs --target=node18 --outdir=electron/dist --out-extension:.js=.cjs --external:electron",
+    "dev:vite": "vite",
+    "dev:electron": "npm run build:electron && wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .",
+    "dev": "concurrently -k -n VITE,ELECTRON -c cyan,magenta \"npm:dev:vite\" \"npm:dev:electron\"",
+    "build:renderer": "vite build",
+    "build": "npm run typecheck && npm run build:electron && npm run build:renderer",
+    "dist": "npm run build && electron-builder",
+    "typecheck": "tsc --noEmit",
+    "test:backend": "cd backend && python3 -m unittest discover -s tests -p 'test_*.py'",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
+    "electron": "^31.3.0",
+    "electron-builder": "^24.13.3",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.0",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.hashimoto.bridgelog",
+    "productName": "BridgeLog",
+    "files": [
+      "electron/dist/**/*",
+      "frontend/dist/**/*"
+    ],
+    "extraResources": [
+      { "from": "backend", "to": "backend", "filter": ["**/*", "!.venv", "!**/__pycache__"] }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": ["dmg"]
+    }
+  }
+}

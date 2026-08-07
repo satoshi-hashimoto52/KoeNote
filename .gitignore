@@ -1,0 +1,19 @@
+# Node
+node_modules/
+frontend/dist/
+electron/dist/
+dist/
+release/
+
+# Python
+.venv/
+backend/.venv/
+**/__pycache__/
+*.pyc
+
+# OS / editor
+.DS_Store
+*.log
+
+# BridgeLog runtime artifacts
+diagnostics.log
