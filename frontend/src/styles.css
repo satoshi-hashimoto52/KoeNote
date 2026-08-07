@@ -348,7 +348,15 @@ input.invalid {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
   padding-bottom: 8px;
+}
+.actions-left,
+.actions-right {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 button {
@@ -419,7 +427,7 @@ button {
   width: min(480px, 90vw);
 }
 .modal h3 { margin: 0 0 8px; }
-.modal-note { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+.modal-note { color: var(--muted); font-size: 13px; margin: 0 0 14px; white-space: pre-line; }
 .modal-files {
   list-style: none;
   margin: 0 0 14px;

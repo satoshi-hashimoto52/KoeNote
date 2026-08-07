@@ -8,12 +8,10 @@ import {
 } from './features/transcription/useLiveTranscription';
 import {
   backendOrigin,
-  buildRequestText,
   checkOutput,
   createSession,
   finalizeSession,
-  getBridge,
-  updateAttachments
+  getBridge
 } from './services/api';
 
 interface Attachment {
@@ -59,7 +57,9 @@ export default function App() {
   const [transcriptPath, setTranscriptPath] = useState<string | null>(null);
   const [transcriptReady, setTranscriptReady] = useState(false);
   const [banner, setBanner] = useState<{ tone: 'error' | 'warn' | 'ok'; text: string } | null>(null);
-  const [handoffOpen, setHandoffOpen] = useState(false);
+  // 停止押下から session_final / TXT保存完了までの確定処理中フラグ（この間はクリア禁止）。
+  const [finalizing, setFinalizing] = useState(false);
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [health, setHealth] = useState<{ ffmpeg_ok?: boolean; ffmpeg?: string | null } | null>(null);
@@ -229,6 +229,8 @@ export default function App() {
   ]);
 
   const stopRecording = useCallback(async () => {
+    // recording -> finalizing。session_final と TXT保存が確定するまでクリアを禁止する。
+    setFinalizing(true);
     live.stop();
     if (sessionDir) {
       try {
@@ -238,11 +240,11 @@ export default function App() {
       }
     }
     setTranscriptReady(true);
+    setFinalizing(false);
   }, [live, sessionDir]);
 
-  // --- マイGPTへ渡す ---
+  // --- マイGPTを開く（URL をブラウザで開くだけ。データ送信はしない） ---
   const gptUrlValid = isValidGptUrl(gptUrl);
-  const canHandoff = transcriptReady && !recording && Boolean(transcriptPath) && title.trim().length > 0 && gptUrlValid;
 
   const copyTranscript = useCallback(async () => {
     const text = [live.committed, live.partial].filter(Boolean).join('\n');
@@ -255,43 +257,55 @@ export default function App() {
     if (bridge && transcriptPath) await bridge.revealInFinder(transcriptPath);
   }, [bridge, transcriptPath]);
 
-  const handoff = useCallback(async () => {
+  const openGpt = useCallback(async () => {
     setBanner(null);
+    if (!gptUrlValid) {
+      setBanner({ tone: 'error', text: '有効な chatgpt.com のURLを入力してください' });
+      return;
+    }
     if (!bridge) {
-      setBanner({ tone: 'warn', text: 'Electron 環境でのみ実行できます' });
+      setBanner({ tone: 'warn', text: 'Electron 環境でのみブラウザを開けます' });
       return;
     }
-    if (!transcriptPath) return;
-    // 1. 最終TXTの存在確認
-    const [txtCheck] = await bridge.pathExists([transcriptPath]);
-    if (!txtCheck?.exists) {
-      setBanner({ tone: 'error', text: '最終TXTが見つかりません' });
-      return;
-    }
-    // 2. 登録資料の存在確認（会議メタも更新）
-    await verifyAttachments();
-    if (sessionDir) await updateAttachments(sessionDir, attachments.map((a) => a.path)).catch(() => {});
-    // 3. マイGPT URL を既定ブラウザで開く
+    // Main プロセスの shell.openExternal（許可ドメイン検証つき）を IPC 経由で呼ぶ。
     const opened = await bridge.openExternal(gptUrl.trim());
     if (!opened.ok) {
       setBanner({ tone: 'error', text: '許可されていない URL です（chatgpt.com のみ開けます）' });
-      return;
     }
-    // 4. 依頼文をクリップボードへ
-    const text = buildRequestText(title.trim(), attachments.map((a) => a.name), requestTemplate);
-    await bridge.writeClipboard(text);
-    // 5. 添付一覧をダイアログ表示 + 6. Finder で TXT を表示
-    setHandoffOpen(true);
-    await bridge.revealInFinder(transcriptPath);
-  }, [bridge, transcriptPath, verifyAttachments, sessionDir, attachments, gptUrl, title, requestTemplate]);
+  }, [bridge, gptUrl, gptUrlValid]);
 
-  const missingAttachments = attachments.filter((a) => !a.exists);
+  // --- クリア（画面状態のリセットのみ。保存済みファイルは削除しない） ---
+  const canClear = !recording && !finalizing;
+
+  const doClear = useCallback(() => {
+    setTitle('');
+    live.reset(); // committed/partial/final表示・savedPath・診断ログ・session/result 追跡をリセット
+    setElapsedSec(0);
+    setSessionDir(null);
+    setTranscriptPath(null);
+    setTranscriptReady(false);
+    setBanner(null);
+    setClearConfirmOpen(false);
+  }, [live]);
+
+  const onClearClick = useCallback(() => {
+    if (!canClear) return;
+    // 文字起こしテキストがある場合だけ確認する。
+    if (live.committed || live.partial) {
+      setClearConfirmOpen(true);
+    } else {
+      doClear();
+    }
+  }, [canClear, live.committed, live.partial, doClear]);
+
   const statusTone = useMemo(() => {
     if (live.status.includes('エラー')) return 'error';
-    if (recording) return 'recording';
+    if (recording || finalizing) return 'recording';
     if (transcriptReady) return 'done';
     return 'idle';
-  }, [live.status, recording, transcriptReady]);
+  }, [live.status, recording, finalizing, transcriptReady]);
+
+  const phaseLabel = recording ? '録音中' : finalizing ? '確定処理中…' : live.status;
 
   return (
     <div className="app">
@@ -300,7 +314,7 @@ export default function App() {
           <span className="brand">BridgeLog</span>
         </div>
         <span className={`status-pill tone-${statusTone}`}>
-          <span className="dot" /> {recording ? '録音中' : live.status}
+          <span className="dot" /> {phaseLabel}
         </span>
       </header>
 
@@ -432,20 +446,39 @@ export default function App() {
               />
             </span>
           </span>
-          <span>状態: {recording ? '録音中' : live.status}</span>
+          <span>状態: {phaseLabel}</span>
           {live.savedPath ? <span className="saved-path" title={live.savedPath}>保存: {baseName(live.savedPath)}</span> : null}
         </section>
 
         <section className="actions">
-          <button type="button" className="btn-primary" onClick={startRecording} disabled={recording}>
-            文字起こし開始
-          </button>
-          <button type="button" className="btn-danger" onClick={stopRecording} disabled={!recording}>
-            停止
-          </button>
-          <button type="button" className="btn-accent" onClick={handoff} disabled={!canHandoff} title={!canHandoff ? '文字起こし完了・タイトル・マイGPT URL が必要です' : ''}>
-            マイGPTへ渡す
-          </button>
+          <div className="actions-left">
+            <button type="button" className="btn-primary" onClick={startRecording} disabled={recording || finalizing}>
+              文字起こし開始
+            </button>
+            <button type="button" className="btn-danger" onClick={stopRecording} disabled={!recording}>
+              停止
+            </button>
+          </div>
+          <div className="actions-right">
+            <button
+              type="button"
+              className="btn-ghost"
+              onClick={onClearClick}
+              disabled={!canClear}
+              title={!canClear ? '録音中・確定処理中はクリアできません' : '画面表示をリセット（保存ファイルは削除しません）'}
+            >
+              クリア
+            </button>
+            <button
+              type="button"
+              className="btn-accent"
+              onClick={openGpt}
+              disabled={!gptUrlValid}
+              title={!gptUrlValid ? '有効な chatgpt.com のURLを入力してください' : 'マイGPT をブラウザで開く'}
+            >
+              マイGPTを開く
+            </button>
+          </div>
         </section>
 
         <details className="diag">
@@ -465,31 +498,18 @@ export default function App() {
         </details>
       </main>
 
-      {handoffOpen ? (
-        <div className="modal-backdrop" onClick={() => setHandoffOpen(false)}>
+      {clearConfirmOpen ? (
+        <div className="modal-backdrop" onClick={() => setClearConfirmOpen(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>マイGPTへ渡す準備が整いました</h3>
+            <h3>現在の表示内容をクリアしますか？</h3>
             <p className="modal-note">
-              依頼文をクリップボードへコピーし、マイGPT をブラウザで開きました。
-              以下のファイルを ChatGPT の画面へ添付してください。
+              会議／セミナータイトル、文字起こしテキスト、録音進捗が初期化されます。
+              {'\n'}マイGPTのURL・資料・保存先・入力設定は保持されます。
+              {'\n\n'}保存済みの文字起こしファイルは削除されません。
             </p>
-            <ul className="modal-files">
-              <li>
-                <span>文字起こしテキスト</span>
-                <button type="button" className="btn-mini" onClick={openTranscript}>Finder</button>
-              </li>
-              {attachments.map((a) => (
-                <li key={a.path} className={a.exists ? '' : 'missing'}>
-                  <span>{a.name}{!a.exists ? '（見つかりません）' : ''}</span>
-                  {bridge ? <button type="button" className="btn-mini" onClick={() => bridge.revealInFinder(a.path)}>Finder</button> : null}
-                </li>
-              ))}
-            </ul>
-            {missingAttachments.length ? (
-              <p className="hint hint-error">存在しない資料があります。ファイルを確認してください。</p>
-            ) : null}
             <div className="modal-actions">
-              <button type="button" className="btn-ghost" onClick={() => setHandoffOpen(false)}>閉じる</button>
+              <button type="button" className="btn-ghost" onClick={() => setClearConfirmOpen(false)}>キャンセル</button>
+              <button type="button" className="btn-accent" onClick={doClear}>クリア</button>
             </div>
           </div>
         </div>
