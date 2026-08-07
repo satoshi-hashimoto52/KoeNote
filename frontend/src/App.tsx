@@ -7,6 +7,7 @@ import {
   type LiveModel
 } from './features/transcription/useLiveTranscription';
 import {
+  backendOrigin,
   buildRequestText,
   checkOutput,
   createSession,
@@ -61,6 +62,8 @@ export default function App() {
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [health, setHealth] = useState<{ ffmpeg_ok?: boolean; ffmpeg?: string | null } | null>(null);
+  const [backendLog, setBackendLog] = useState('');
 
   const { recording } = live;
 
@@ -98,6 +101,19 @@ export default function App() {
   useEffect(() => {
     refreshMics().catch(() => {});
   }, [refreshMics]);
+
+  // Backend の ffmpeg 解決状況を取得（realtime デコード失敗の一次切り分け）。
+  useEffect(() => {
+    fetch(`${backendOrigin()}/api/health`)
+      .then((r) => r.json())
+      .then((h) => setHealth(h))
+      .catch(() => setHealth(null));
+  }, []);
+
+  const loadBackendLog = useCallback(async () => {
+    if (!bridge) return;
+    setBackendLog(await bridge.getBackendLog());
+  }, [bridge]);
 
   useEffect(() => {
     bridge?.setRecordingState(recording);
@@ -290,6 +306,12 @@ export default function App() {
 
       <main className="content">
         {banner ? <div className={`banner banner-${banner.tone}`}>{banner.text}</div> : null}
+        {health && health.ffmpeg_ok === false ? (
+          <div className="banner banner-error">
+            Backend が ffmpeg/ffprobe を見つけられません。realtime のデコードができず文字起こしは空のままになります。
+            Homebrew の ffmpeg をインストール（`brew install ffmpeg`）し、アプリを再起動してください。
+          </div>
+        ) : null}
 
         <section className="field">
           <label htmlFor="title">会議／セミナータイトル<span className="req">必須</span></label>
@@ -401,6 +423,15 @@ export default function App() {
         <section className="statusbar">
           <span>{formatElapsed(elapsedSec)}</span>
           <span>入力: {live.deviceLabel}</span>
+          <span className="level-meter" title={`入力レベル(RMS)=${live.inputLevel.toFixed(4)}`}>
+            レベル
+            <span className="level-track">
+              <span
+                className={`level-fill ${live.inputLevel < 0.001 && recording ? 'silent' : ''}`}
+                style={{ width: `${Math.min(100, live.inputLevel * 400)}%` }}
+              />
+            </span>
+          </span>
           <span>状態: {recording ? '録音中' : live.status}</span>
           {live.savedPath ? <span className="saved-path" title={live.savedPath}>保存: {baseName(live.savedPath)}</span> : null}
         </section>
@@ -416,6 +447,22 @@ export default function App() {
             マイGPTへ渡す
           </button>
         </section>
+
+        <details className="diag">
+          <summary>診断ログ（Realtime パイプライン）</summary>
+          <div className="diag-tools">
+            <span>入力レベル(RMS): {live.inputLevel.toFixed(4)}{live.inputLevel < 0.001 && recording ? ' ⚠ ほぼ無音 — BlackHole のルーティングを確認' : ''}</span>
+            <span>ffmpeg: {health ? (health.ffmpeg_ok ? `OK (${baseName(health.ffmpeg || '')})` : 'なし') : '不明'}</span>
+            {bridge ? <button type="button" className="btn-mini" onClick={loadBackendLog}>Backendログ取得</button> : null}
+          </div>
+          <pre className="diag-log">{live.logText || 'ログなし'}</pre>
+          {backendLog ? (
+            <>
+              <h4 className="diag-h">Backendログ</h4>
+              <pre className="diag-log">{backendLog}</pre>
+            </>
+          ) : null}
+        </details>
       </main>
 
       {handoffOpen ? (

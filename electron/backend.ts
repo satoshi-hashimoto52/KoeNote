@@ -30,6 +30,31 @@ function resolvePython(): string {
   return process.env.BRIDGELOG_PYTHON || 'python3';
 }
 
+// GUI から起動した Electron は PATH が最小構成になり Homebrew の ffmpeg/ffprobe を
+// 見つけられないことがある。子 Backend が必ず ffmpeg を解決できるよう PATH を補い、
+// 見つかれば BRIDGELOG_FFMPEG_DIR も設定する（realtime のデコード失敗＝空文字化を防ぐ）。
+const FFMPEG_CANDIDATE_DIRS = ['/opt/homebrew/bin', '/usr/local/bin'];
+
+function detectFfmpegDir(): string | null {
+  for (const dir of FFMPEG_CANDIDATE_DIRS) {
+    if (existsSync(join(dir, 'ffmpeg')) && existsSync(join(dir, 'ffprobe'))) return dir;
+  }
+  return null;
+}
+
+function buildBackendEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  const existing = (env.PATH || '').split(':').filter(Boolean);
+  const merged = [...FFMPEG_CANDIDATE_DIRS, '/usr/bin', '/bin', '/usr/sbin', '/sbin', ...existing];
+  env.PATH = Array.from(new Set(merged)).join(':');
+  const ffmpegDir = detectFfmpegDir();
+  if (ffmpegDir && !env.BRIDGELOG_FFMPEG_DIR) {
+    env.BRIDGELOG_FFMPEG_DIR = ffmpegDir;
+  }
+  pushLog(`[backend] PATH=${env.PATH}\n[backend] ffmpeg_dir=${env.BRIDGELOG_FFMPEG_DIR || '(PATH解決)'}\n`);
+  return env;
+}
+
 function pushLog(line: string): void {
   logBuffer.push(line);
   if (logBuffer.length > MAX_LOG_LINES) logBuffer.splice(0, logBuffer.length - MAX_LOG_LINES);
@@ -76,7 +101,7 @@ export async function startBackend(): Promise<void> {
   backendProcess = spawn(
     python,
     ['-m', 'uvicorn', 'main:app', '--host', BACKEND_HOST, '--port', String(BACKEND_PORT)],
-    { cwd, env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] }
+    { cwd, env: buildBackendEnv(), stdio: ['ignore', 'pipe', 'pipe'] }
   );
 
   backendProcess.stdout?.on('data', (d) => pushLog(`[backend] ${d}`));

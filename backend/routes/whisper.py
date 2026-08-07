@@ -435,6 +435,12 @@ async def live_transcribe(websocket: WebSocket):
             return
 
         session = LiveSession(LiveSessionConfig.from_payload(payload), session_id=uuid.uuid4().hex)
+        print(
+            f"[WS] ready session={session.session_id} model={session.config.model} "
+            f"chunk={session.config.chunk_seconds}s overlap={session.config.overlap_seconds}s "
+            f"send_mode={session.config.send_mode} saved={session.saved_path}",
+            flush=True,
+        )
         await websocket.send_json(
             {
                 "type": "ready",
@@ -456,6 +462,11 @@ async def live_transcribe(websocket: WebSocket):
                     continue
                 if command.get("type") == "stop":
                     final_result = session.finalize()
+                    print(
+                        f"[WS] session_final session={session.session_id} "
+                        f"committed_len={len(final_result['committed_text'])} saved={session.saved_path}",
+                        flush=True,
+                    )
                     await websocket.send_json(
                         {
                             "type": "session_final",
@@ -477,6 +488,11 @@ async def live_transcribe(websocket: WebSocket):
                 continue
             try:
                 byte_size = len(audio_bytes)
+                print(
+                    f"[WS] recv session={session.session_id} chunk={session.received_chunk_count + 1} "
+                    f"bytes={byte_size} mime={session.config.mime_type}",
+                    flush=True,
+                )
                 await websocket.send_json(
                     {
                         "type": "log",
@@ -503,6 +519,7 @@ async def live_transcribe(websocket: WebSocket):
                 )
                 result = await asyncio.to_thread(session.transcribe_chunk, audio_bytes)
             except Exception as exc:
+                print(f"[WS] ERROR stage=websocket_receive type={type(exc).__name__} msg={exc}", flush=True)
                 await websocket.send_json(
                     {
                         "type": "error",
@@ -519,6 +536,22 @@ async def live_transcribe(websocket: WebSocket):
 
             rms = float(result.get("rms", 0.0) or 0.0)
             duration = float(result.get("duration_seconds", 0.0) or 0.0)
+            print(
+                f"[decode] session={session.session_id} input_bytes={len(audio_bytes)} "
+                f"duration={duration:.1f}s rms={rms:.4f} skipped={result.get('skipped')} "
+                f"skip_reason={result.get('skip_reason') or '-'}",
+                flush=True,
+            )
+            if not result.get("skipped") or result.get("committed_text") or result.get("partial_text"):
+                print(
+                    f"[whisper] session={session.session_id} window={result.get('window_index')} "
+                    f"range={result.get('window_start', 0):.1f}-{result.get('window_end', 0):.1f}s "
+                    f"segs={len(result.get('segments', []))} "
+                    f"commit_segs={result.get('commit_segment_count', 0)} partial_segs={result.get('partial_segment_count', 0)} "
+                    f"committed_len={len(result.get('committed_text', ''))} "
+                    f"partial_len={len(result.get('partial_text', ''))}",
+                    flush=True,
+                )
             segment_summary = ";".join(
                 f"{segment.get('start', 0):.1f}-{segment.get('end', 0):.1f}:{str(segment.get('text', ''))[:20]}"
                 for segment in result.get("segments", [])
@@ -591,6 +624,12 @@ async def live_transcribe(websocket: WebSocket):
                 }
             )
             if result.get("committed_text") or result.get("partial_text"):
+                print(
+                    f"[WS] update session={session.session_id} "
+                    f"committed_len={len(result['committed_text'])} partial_len={len(result['partial_text'])} "
+                    f"result_id={result['result_id']}",
+                    flush=True,
+                )
                 await websocket.send_json(
                     {
                         "type": "update",
@@ -612,8 +651,9 @@ async def live_transcribe(websocket: WebSocket):
                     }
                 )
     except WebSocketDisconnect:
-        pass
+        print("[WS] disconnect", flush=True)
     except Exception as exc:
+        print(f"[WS] ERROR fatal type={type(exc).__name__} msg={exc}", flush=True)
         try:
             await websocket.send_json({"type": "error", "message": str(exc)})
         except Exception:

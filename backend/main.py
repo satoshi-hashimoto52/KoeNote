@@ -35,4 +35,22 @@ app.include_router(session_router)
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "app": "BridgeLog"}
+    # Backend プロセスから見た ffmpeg/ffprobe の解決状況も返し、
+    # realtime デコード失敗（空文字化）の一次切り分けに使えるようにする。
+    import shutil
+    from services.transcriber import resolve_ffmpeg_dir
+
+    ffmpeg_dir = resolve_ffmpeg_dir()
+    if ffmpeg_dir is not None:
+        ffmpeg = str(ffmpeg_dir / "ffmpeg") if (ffmpeg_dir / "ffmpeg").is_file() else shutil.which("ffmpeg")
+        ffprobe = str(ffmpeg_dir / "ffprobe") if (ffmpeg_dir / "ffprobe").is_file() else shutil.which("ffprobe")
+    else:
+        ffmpeg = shutil.which("ffmpeg")
+        ffprobe = shutil.which("ffprobe")
+    return {
+        "status": "ok",
+        "app": "BridgeLog",
+        "ffmpeg": ffmpeg,
+        "ffprobe": ffprobe,
+        "ffmpeg_ok": bool(ffmpeg and ffprobe),
+    }

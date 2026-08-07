@@ -39,9 +39,15 @@ export interface LiveState {
   savedPath: string | null;
   deviceLabel: string;
   logText: string;
+  inputLevel: number;
   start: (opts: StartOptions) => Promise<void>;
   stop: () => void;
   reset: () => void;
+}
+
+function wsStateName(ws: WebSocket | null): string {
+  if (!ws) return 'NONE';
+  return ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][ws.readyState] ?? String(ws.readyState);
 }
 
 export function useLiveTranscription(): LiveState {
@@ -52,6 +58,7 @@ export function useLiveTranscription(): LiveState {
   const [savedPath, setSavedPath] = useState<string | null>(null);
   const [deviceLabel, setDeviceLabel] = useState('-');
   const [logText, setLogText] = useState('');
+  const [inputLevel, setInputLevel] = useState(0);
 
   const socketRef = useRef<WebSocket | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -59,6 +66,12 @@ export function useLiveTranscription(): LiveState {
   const blobBufferRef = useRef<Blob[]>([]);
   const sendTimerRef = useRef<number | null>(null);
   const processedIdsRef = useRef<string[]>([]);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const startTimeRef = useRef<number>(0);
+  const chunkCountRef = useRef<number>(0);
+  const sendCountRef = useRef<number>(0);
 
   const appendLog = useCallback((message: string) => {
     const time = new Date().toLocaleTimeString();
@@ -70,6 +83,10 @@ export function useLiveTranscription(): LiveState {
       window.clearInterval(sendTimerRef.current);
       sendTimerRef.current = null;
     }
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
     if (recorderRef.current && recorderRef.current.state !== 'inactive') {
       try {
         recorderRef.current.stop();
@@ -80,7 +97,13 @@ export function useLiveTranscription(): LiveState {
     recorderRef.current = null;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
+    analyserRef.current = null;
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current = null;
+    }
     blobBufferRef.current = [];
+    setInputLevel(0);
   }, []);
 
   useEffect(() => {
@@ -140,6 +163,36 @@ export function useLiveTranscription(): LiveState {
         `入力デバイス=${track?.label || '不明'} channels=${trackSettings?.channelCount || '-'} sampleRate=${trackSettings?.sampleRate || '-'}`
       );
 
+      // 入力レベルメーター（AnalyserNode の RMS）。Whisper とは独立に、
+      // BlackHole から実際に音が来ているか（rms>0）を即座に確認できる。
+      try {
+        const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+        const audioCtx = new AudioCtx();
+        audioCtxRef.current = audioCtx;
+        const source = audioCtx.createMediaStreamSource(stream);
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 2048;
+        source.connect(analyser);
+        analyserRef.current = analyser;
+        const buffer = new Float32Array(analyser.fftSize);
+        const tick = () => {
+          const node = analyserRef.current;
+          if (!node) return;
+          node.getFloatTimeDomainData(buffer);
+          let sum = 0;
+          for (let i = 0; i < buffer.length; i += 1) sum += buffer[i] * buffer[i];
+          setInputLevel(Math.sqrt(sum / buffer.length));
+          rafRef.current = requestAnimationFrame(tick);
+        };
+        rafRef.current = requestAnimationFrame(tick);
+      } catch (err) {
+        appendLog(`入力レベルメーター初期化失敗: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
+      chunkCountRef.current = 0;
+      sendCountRef.current = 0;
+      startTimeRef.current = Date.now();
+
       const socket = new WebSocket(`${wsOrigin()}/ws/live`);
       socketRef.current = socket;
       socket.binaryType = 'arraybuffer';
@@ -170,7 +223,15 @@ export function useLiveTranscription(): LiveState {
         const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
         recorderRef.current = recorder;
         recorder.ondataavailable = (event) => {
-          if (!event.data || event.data.size === 0) return;
+          chunkCountRef.current += 1;
+          const elapsed = ((Date.now() - startTimeRef.current) / 1000).toFixed(1);
+          if (!event.data || event.data.size === 0) {
+            appendLog(`[RT] chunk=${chunkCountRef.current} size=0 (空) t=${elapsed}s ws=${wsStateName(socket)}`);
+            return;
+          }
+          appendLog(
+            `[RT] chunk=${chunkCountRef.current} size=${event.data.size} type=${event.data.type || '-'} t=${elapsed}s ws=${wsStateName(socket)}`
+          );
           // 送信済み音声を無制限に保持せず、次送信で使う最新Blob群のみ保持する。
           blobBufferRef.current.push(event.data);
         };
@@ -183,12 +244,19 @@ export function useLiveTranscription(): LiveState {
         appendLog(`MediaRecorder MIME=${mimeType || 'browser-default'} timeslice=1000ms`);
 
         sendTimerRef.current = window.setInterval(() => {
-          if (socket.readyState !== WebSocket.OPEN || blobBufferRef.current.length === 0) return;
+          if (socket.readyState !== WebSocket.OPEN) {
+            appendLog(`[RT] 送信スキップ ws=${wsStateName(socket)} buffered_chunks=${blobBufferRef.current.length}`);
+            return;
+          }
+          if (blobBufferRef.current.length === 0) return;
           // send_mode:'full' はヘッダ保持のため先頭からの全体を1Blobで送る。
           const blob = new Blob(blobBufferRef.current, { type: mimeType || fallback });
           if (blob.size > 0) {
+            sendCountRef.current += 1;
             socket.send(blob);
-            appendLog(`音声chunk送信 bytes=${blob.size} buffered=${socket.bufferedAmount}`);
+            appendLog(
+              `[RT] send=${sendCountRef.current} bytes=${blob.size} chunks=${blobBufferRef.current.length} ws=${wsStateName(socket)} bufferedAmount=${socket.bufferedAmount}`
+            );
           }
         }, 1000);
 
@@ -214,9 +282,15 @@ export function useLiveTranscription(): LiveState {
           appendLog('WebSocket ready');
         } else if (data.type === 'update') {
           // committed はスナップショット置換、partial は置換。
+          appendLog(
+            `[RT] recv update committed_len=${(data.committed_text ?? '').length} partial_len=${(data.partial_text ?? '').length} result_id=${data.result_id ?? '-'}`
+          );
           setCommitted(data.committed_text ?? '');
           setPartial(data.partial_text ?? '');
         } else if (data.type === 'session_final') {
+          appendLog(
+            `[RT] recv session_final committed_len=${(data.committed_text ?? data.text ?? '').length}`
+          );
           setCommitted(data.committed_text ?? data.text ?? '');
           setPartial(data.partial_text ?? '');
           setSavedPath(data.saved_path ?? null);
@@ -257,5 +331,5 @@ export function useLiveTranscription(): LiveState {
     appendLog('リアルタイム文字起こしを停止しました');
   }, [appendLog, cleanup]);
 
-  return { committed, partial, status, recording, savedPath, deviceLabel, logText, start, stop, reset };
+  return { committed, partial, status, recording, savedPath, deviceLabel, logText, inputLevel, start, stop, reset };
 }
