@@ -12,10 +12,10 @@ process.env.BRIDGELOG_PORT = String(BACKEND_PORT);
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 1100,
-    height: 820,
-    minWidth: 720,
-    minHeight: 560,
+    width: 960,
+    height: 900,
+    minWidth: 460,
+    minHeight: 650,
     backgroundColor: '#09090B',
     titleBarStyle: 'hiddenInset',
     title: 'BridgeLog',

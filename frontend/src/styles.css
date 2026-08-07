@@ -22,7 +22,10 @@ html,
 body,
 #root {
   height: 100%;
+  width: 100%;
+  min-width: 0;
   margin: 0;
+  overflow-x: hidden;
 }
 
 body {
@@ -45,18 +48,27 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   height: 44px;
   padding: 0 16px 0 84px; /* macOS の信号機ボタン分を空ける */
   background: var(--card);
   border-bottom: 1px solid var(--border);
   -webkit-app-region: drag;
   flex: none;
+  min-width: 0;
 }
 
 .titlebar-drag {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+}
+
+.brand {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .brand {
@@ -75,6 +87,8 @@ body {
   border: 1px solid var(--border);
   padding: 4px 10px;
   border-radius: 999px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .status-pill .dot {
@@ -97,13 +111,22 @@ body {
 .content {
   flex: 1;
   overflow-y: auto;
-  padding: 20px;
-  max-width: 900px;
+  overflow-x: hidden;
+  padding: 24px 28px;
+  max-width: 960px;
   width: 100%;
+  min-width: 0;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+@media (max-width: 700px) {
+  .content { padding: 20px 18px; }
+}
+@media (max-width: 520px) {
+  .content { padding: 16px 14px; gap: 14px; }
 }
 
 .banner {
@@ -120,12 +143,15 @@ body {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
 }
 
 .field-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .field label {
@@ -175,16 +201,31 @@ input.invalid {
   display: flex;
   gap: 8px;
 }
-.inline input { flex: 1; }
+.inline input { flex: 1; min-width: 0; }
+
+/* 保存先: 狭幅では縦積み。ボタンは無駄に全幅にせず右寄せの自然な幅。 */
+@media (max-width: 520px) {
+  .inline {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .inline > button {
+    align-self: flex-end;
+  }
+}
 
 .row-3 {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
-.row-3 > div { display: flex; flex-direction: column; gap: 6px; }
+.row-3 > div { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 
-@media (max-width: 640px) {
+/* 900px以上=3列 / 中間=2列 / 狭幅=1列 */
+@media (max-width: 760px) {
+  .row-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
   .row-3 { grid-template-columns: 1fr; }
 }
 
@@ -219,6 +260,7 @@ input.invalid {
 }
 .att-name {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -226,10 +268,12 @@ input.invalid {
 .att-warn {
   font-size: 11px;
   color: var(--warn);
+  flex-shrink: 0;
 }
 .att-actions {
   display: flex;
   gap: 6px;
+  flex-shrink: 0;
 }
 
 /* --- Transcript --- */
@@ -238,13 +282,17 @@ input.invalid {
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  height: 260px;
+  width: 100%;
+  min-width: 0;
+  height: clamp(260px, 42vh, 520px);
 }
 .transcript-scroll {
   height: 100%;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 14px 16px;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
   font-size: 15px;
   line-height: 1.7;
@@ -272,7 +320,7 @@ input.invalid {
 /* --- Status bar --- */
 .statusbar {
   display: flex;
-  gap: 18px;
+  gap: 12px 18px;
   flex-wrap: wrap;
   font-size: 12px;
   color: var(--muted);
@@ -280,8 +328,9 @@ input.invalid {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 10px 14px;
+  min-width: 0;
 }
-.saved-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+.saved-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 
 .level-meter {
   display: inline-flex;
@@ -328,7 +377,11 @@ input.invalid {
   margin: 10px 0;
 }
 .diag-h { font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
+.diag {
+  min-width: 0;
+}
 .diag-log {
+  max-width: 100%;
   max-height: 220px;
   overflow: auto;
   background: var(--bg);
@@ -338,6 +391,7 @@ input.invalid {
   font-size: 11px;
   line-height: 1.5;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
   margin: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -362,6 +416,7 @@ input.invalid {
 button {
   font-family: inherit;
   cursor: pointer;
+  white-space: nowrap; /* ボタン文字を途中で折り返さない */
 }
 
 .btn-primary,
