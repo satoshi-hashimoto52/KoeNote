@@ -11,6 +11,7 @@ from typing import Optional
 
 from .live_transcriber import (
     DEFAULT_MODEL,
+    MIN_RMS,
     SUPPORTED_MODELS,
     convert_webm_bytes_to_wav,
     transcribe_pcm16,
@@ -18,6 +19,22 @@ from .live_transcriber import (
 )
 from .pcm_stream import BYTES_PER_SAMPLE, SAMPLE_RATE, PcmRingBuffer, Resampler16k
 from .transcriber import resolve_ffmpeg_dir
+from .word_commit import (
+    ANCHOR_WORDS,
+    CURSOR_MARGIN_SECONDS,
+    DRAIN_MAX_WINDOWS,
+    EPS,
+    MAX_ERROR_RETRIES,
+    MAX_NO_PROGRESS_RETRIES,
+    MAX_SAME_WINDOW_RETRIES,
+    MIN_ADVANCE_SECONDS,
+    CommitWord,
+    DegradeReason,
+    WindowCounters,
+    classify_words,
+    normalize_words,
+    trim_committed,
+)
 
 
 DELAY_PRESETS = {
@@ -30,6 +47,8 @@ DELAY_PRESETS = {
 BUFFER_CAPACITY_SECONDS = 180.0
 # 停止時にこれ未満の端切れしか残っていなければ、無理に1窓回さない。
 MIN_FLUSH_TAIL_SECONDS = 0.5
+# 診断ログの保持行数（状態量を有界に保つ）。
+MAX_DEGRADE_LOG_LINES = 200
 # 遅延がこれを超えたら overlap を捨ててスループットを稼ぐ（音声を落とす前の安全弁）。
 LAG_CATCHUP_THRESHOLD_SECONDS = 30.0
 
@@ -166,6 +185,21 @@ class LiveSession:
         self.degraded = False
         self.stopping = False
 
+        # --- word 単位の確定（方式G） ---
+        # 確定済み末尾。アンカー照合に使うぶんだけ保持するので状態量は有界。
+        self.committed_words: list[CommitWord] = []
+        # 直近1窓の未確定語。表示専用でファイルへは出さない。
+        self.pending_words: list[CommitWord] = []
+        self.counters = WindowCounters()
+        self.degrade_log: list[str] = []
+        self._error_retries = 0
+        self._pending_rounds = 0
+        self._same_window_count = 0
+        self._no_progress_rounds = 0
+        self._giving_up_on_window = False
+        self._needs_recheck = False
+        self._last_planned: Optional[tuple[int, int]] = None
+
         if config.write_to_file:
             self.saved_path = self._prepare_output_path(config.output_folder)
             self._file = open(self.saved_path, "a", encoding="utf-8")
@@ -180,13 +214,26 @@ class LiveSession:
             self._file = None
 
     def finalize(self) -> dict:
-        """停止時だけ暫定文を確定し、途中仮説を通常TXTへ書き込まない。"""
-        remaining = _join_transcript("", self.partial_text)
-        if remaining:
-            self.committed_text = _join_transcript(self.committed_text, remaining)
-            self._append_to_file(remaining)
-            self.partial_segments = []
-            self.partial_text = ""
+        """最終確定。partial_text を無条件に追記しない。
+
+        PCM 経路では drain_on_stop が同じ判定で末尾まで確定させるため、ここでは
+        追記しない（無条件追記は既確定分の二重書き込みの原因になる）。
+        レガシー webm 経路には drain が無いので、そちらだけ従来どおり回収する。
+        """
+        if self.config.send_mode != "pcm16":
+            remaining = _join_transcript("", self.partial_text)
+            if remaining:
+                self.committed_text = _join_transcript(self.committed_text, remaining)
+                self._append_to_file(remaining)
+                self.partial_segments = []
+                self.partial_text = ""
+        elif self.pending_words:
+            # drain 後に残っていてはいけない。残っていたら異常として記録する。
+            self.log_degraded(
+                DegradeReason.DRAIN_UNRECOVERED,
+                pending_words=len(self.pending_words),
+                phase="finalize",
+            )
         self.final_text = self.committed_text
         return {
             "text": self.final_text,
@@ -199,6 +246,7 @@ class LiveSession:
             "saved_path": self.saved_path,
             "recorded_seconds": self.recorded_seconds,
             "dropped_seconds": self.dropped_seconds,
+            "counters": self.counters.as_dict(),
         }
 
     # ------------------------------------------------------------------
@@ -225,11 +273,13 @@ class LiveSession:
             "lag_seconds": round(self.lag_seconds, 2),
             "dropped_seconds": round(self.dropped_seconds, 2),
             "committed_length": len(self.committed_text),
+            "pending_word_count": len(self.pending_words),
             "window_index": self.window_index,
             "received_chunk_count": self.received_chunk_count,
             "last_audio_received_at": self.last_audio_received_at,
             "last_transcription_at": self.last_transcription_at,
             "degraded": self.degraded,
+            **self.counters.as_dict(),
         }
 
     # ------------------------------------------------------------------
@@ -264,11 +314,24 @@ class LiveSession:
     # PCM 経路: 窓の決定（event loop スレッド）
     # ------------------------------------------------------------------
 
+    def log_degraded(self, reason: str, **detail) -> None:
+        """縮退・強制の発生を reason コード付きで記録する。"""
+        parts = " ".join(f"{k}={v}" for k, v in detail.items())
+        line = f"[{_timestamp()}] {reason} {parts}".rstrip()
+        self.degrade_log.append(line)
+        if len(self.degrade_log) > MAX_DEGRADE_LOG_LINES:
+            del self.degrade_log[: len(self.degrade_log) - MAX_DEGRADE_LOG_LINES]
+        print(f"[degraded] session={self.session_id} {line}", flush=True)
+
     def _effective_step(self) -> int:
         # 遅れているときは overlap を捨てて追いつく（音声を落とすより先に試す手）。
         if self.lag_seconds > LAG_CATCHUP_THRESHOLD_SECONDS:
             return self.chunk_samples
         return self.step_samples
+
+    # ------------------------------------------------------------------
+    # PCM 経路: 窓の決定（event loop スレッド）
+    # ------------------------------------------------------------------
 
     def plan_window(self) -> Optional[tuple[int, int]]:
         """次に処理すべき窓 [start, end) を絶対サンプル番号で返す。
@@ -277,6 +340,17 @@ class LiveSession:
         無言で文字起こしされないまま消える。カーソルを step ずつ進めることで、
         遅れても順に消化して取りこぼさない。
         """
+        # 推論に連続して失敗した窓は、上限を超えたら最小前進で先へ出す。
+        # 取り逃した区間は停止時の排出で回収する。
+        if self._error_retries > MAX_ERROR_RETRIES:
+            self._error_retries = 0
+            self.counters.cursor_min_advance_count += 1
+            self.log_degraded(
+                DegradeReason.INFERENCE_RETRY_EXHAUSTED,
+                next_window_end=self.next_window_end,
+            )
+            self.next_window_end += self._min_advance_samples()
+
         total = self.pcm.total_samples
         if total < self.next_window_end:
             return None
@@ -292,73 +366,417 @@ class LiveSession:
             if total < self.next_window_end:
                 return None
             start = max(0, self.next_window_end - self.chunk_samples)
-        return (start, self.next_window_end)
+
+        plan = (start, self.next_window_end)
+        if not self._check_window_safety(plan):
+            return None
+
+        # 同じ窓を無限に処理しないための上限。
+        if self._last_planned == plan:
+            self._same_window_count += 1
+            if self._same_window_count >= MAX_SAME_WINDOW_RETRIES:
+                self.counters.same_window_retry_count += 1
+                self.log_degraded(
+                    DegradeReason.SAME_WINDOW_RETRY,
+                    window=f"{plan[0]}-{plan[1]}",
+                    count=self._same_window_count,
+                )
+                self._same_window_count = 0
+                self.next_window_end += self._min_advance_samples()
+                return self.plan_window()
+        else:
+            self._same_window_count = 0
+        self._last_planned = plan
+        return plan
+
+    def _min_advance_samples(self) -> int:
+        return max(int(round(MIN_ADVANCE_SECONDS * SAMPLE_RATE)), 1)
+
+    def _check_window_safety(self, plan: tuple[int, int]) -> bool:
+        """窓が安全かを実行時に検証する。assert に依存せずログと縮退で処理する。"""
+        start, end = plan
+        if end <= start:
+            self.log_degraded(DegradeReason.CURSOR_WINDOW_CLAMPED, cause="empty", start=start, end=end)
+            return False
+        length = end - start
+        if length > self.chunk_samples + self._min_advance_samples():
+            # 窓長が想定を超えた。chunk に収め直す。
+            self.log_degraded(
+                DegradeReason.CURSOR_WINDOW_CLAMPED,
+                cause="too_long",
+                length_seconds=round(length / SAMPLE_RATE, 2),
+            )
+            return False
+        if start < self.pcm.earliest_sample:
+            self.log_degraded(
+                DegradeReason.CURSOR_WINDOW_CLAMPED,
+                cause="outside_ring_buffer",
+                start=start,
+                earliest=self.pcm.earliest_sample,
+            )
+            return False
+        return True
 
     def advance_cursor(self, end_sample: int) -> None:
-        self.next_window_end = end_sample + self._effective_step()
+        """カーソルを進める。未確定音声の先頭を飛び越えない。
+
+        更新式:
+            pending なし: next = end + step
+            pending あり: next = min(end + step,
+                                     round((pending[0].start - CURSOR_MARGIN) * SR) + chunk)
+            共通:         next <= end なら next = end + MIN_ADVANCE
+        """
+        previous = end_sample
+        step = self._effective_step()
+        candidate = end_sample + step
+
+        # 次窓が「未確定の音声の先頭」を必ず含むように制限する。
+        # 基準は次の2つの早い方:
+        #   - 保留語の先頭 - CURSOR_MARGIN
+        #     （報告時刻に推定誤差があるため余裕を引く）
+        #   - 確定端 committed_until（余裕は引かない）
+        #     確定端は確定した語の終端そのもので、そこから始まる窓は未確定分を必ず含む。
+        #     余裕を引くと通常時も窓が余分に重なり、step が縮んでしまう。
+        #     保留だけを基準にすると、whisper が窓の一部を文字化しなかった区間
+        #     （保留にも入らない）を飛び越えてしまう。実測で 8.2 秒の欠落が起きた。
+        anchor_seconds = None
+        if self.pending_words:
+            anchor_seconds = max(0.0, self.pending_words[0].start - CURSOR_MARGIN_SECONDS)
+        if self._needs_recheck and not self._giving_up_on_window:
+            # 音声があるのに確定できなかった窓の直後だけ、確定端まで引き戻す。
+            hard = self.committed_until_seconds
+            anchor_seconds = hard if anchor_seconds is None else min(anchor_seconds, hard)
+        if anchor_seconds is not None:
+            limit = int(round(max(0.0, anchor_seconds) * SAMPLE_RATE)) + self.chunk_samples
+            if limit < candidate:
+                candidate = limit
+
+        if candidate <= previous:
+            # 時刻推定誤差などで前進できない場合の保護。
+            self.counters.cursor_min_advance_count += 1
+            self.log_degraded(
+                DegradeReason.CURSOR_MIN_ADVANCE,
+                previous=previous,
+                candidate=candidate,
+            )
+            candidate = previous + self._min_advance_samples()
+
+        # 未確定音声の先頭を飛び越えていないことの検証。
+        anchor_samples = int(round((anchor_seconds if anchor_seconds is not None else 0.0)
+                                   * SAMPLE_RATE))
+        if (anchor_seconds is not None and candidate - self.chunk_samples > anchor_samples
+                and not self._giving_up_on_window):
+            self.log_degraded(
+                DegradeReason.CURSOR_WOULD_SKIP,
+                anchor=anchor_samples,
+                window_start=candidate - self.chunk_samples,
+            )
+            candidate = max(previous + self._min_advance_samples(),
+                            anchor_samples + self.chunk_samples)
+
+        self.next_window_end = candidate
 
     # ------------------------------------------------------------------
     # PCM 経路: 推論（worker スレッド、同時 1 本）
     # ------------------------------------------------------------------
 
-    def run_window(self, start_sample: int, end_sample: int) -> Optional[dict]:
-        """[start, end) を文字起こしして結果を返す。破棄済み区間なら None。"""
+    def _infer_range(self, start_sample: int, end_sample: int) -> Optional[dict]:
+        """[start, end) を推論する。失敗時は None（カーソルを進めない）。"""
         pcm = self.pcm.read(start_sample, end_sample)
         if pcm is None:
             return None
+        try:
+            return transcribe_pcm16(pcm, self.config.model, debug_save=self.config.debug_chunks)
+        except Exception as exc:
+            self.counters.inference_error_count += 1
+            self._error_retries += 1
+            self.log_degraded(
+                DegradeReason.INFERENCE_FAILED,
+                error_type=type(exc).__name__,
+                message=str(exc)[:120],
+                retries=self._error_retries,
+            )
+            return None
 
-        chunk_result = transcribe_pcm16(
-            pcm,
-            self.config.model,
-            debug_save=self.config.debug_chunks,
-        )
+    def _absolute_segments(self, chunk_result: dict, window_start: float) -> list[dict]:
+        """窓内相対時刻の segment を絶対時刻へ移す。"""
+        segments = []
+        for segment in chunk_result.get("segments", []):
+            words = []
+            for word in segment.get("words", []) or []:
+                start, end = word.get("start"), word.get("end")
+                words.append({
+                    "start": None if start is None else window_start + float(start),
+                    "end": None if end is None else window_start + float(end),
+                    "text": word.get("text", ""),
+                })
+            segments.append({
+                "start": window_start + float(segment.get("start", 0.0) or 0.0),
+                "end": window_start + float(segment.get("end", 0.0) or 0.0),
+                "text": segment.get("text", ""),
+                "words": words,
+            })
+        return segments
+
+    def run_window(self, start_sample: int, end_sample: int) -> Optional[dict]:
+        """[start, end) を文字起こしして結果を返す。
+
+        None を返すのは「カーソルを進めてはいけない」場合（破棄済み区間 / 推論失敗）。
+        """
+        before = self.committed_until_seconds
+        result = self._process_window(start_sample, end_sample, final=False)
+        if result is None:
+            return None
+
+        # whisper が窓の一部を文字化しないことがある。確定が進まない窓が続いたら
+        # 境界をずらして再試行し、それでも駄目なら諦めて先へ進む（諦めた秒数を計上）。
+        has_speech = float(result.get("rms", 0.0) or 0.0) >= MIN_RMS
+        if self.committed_until_seconds > before + EPS:
+            self._no_progress_rounds = 0
+            self._giving_up_on_window = False
+            self._needs_recheck = False
+        elif not has_speech:
+            # 無音の窓で確定が進まないのは正常。カーソルは通常どおり進める。
+            # ここで再確認を要求すると無音区間を最小前進で這うことになる。
+            self._no_progress_rounds = 0
+            self._needs_recheck = False
+        else:
+            # 音声はあるのに確定語が出なかった。whisper が窓の一部を文字化しない
+            # ことがあるため、窓境界をずらして再確認する。
+            self._needs_recheck = True
+            self._no_progress_rounds += 1
+            self.log_degraded(
+                DegradeReason.WINDOW_YIELDED_NOTHING,
+                window=f"{start_sample / SAMPLE_RATE:.2f}-{end_sample / SAMPLE_RATE:.2f}",
+                attempt=self._no_progress_rounds,
+                committed_until=round(before, 2),
+                rms=round(float(result.get("rms", 0.0) or 0.0), 4),
+            )
+            if self._no_progress_rounds >= MAX_NO_PROGRESS_RETRIES:
+                skipped = max(0.0, end_sample / SAMPLE_RATE
+                              - float(self.config.overlap_seconds) - before)
+                self.counters.untranscribed_seconds += skipped
+                self.log_degraded(
+                    DegradeReason.AUDIO_LEFT_UNTRANSCRIBED,
+                    seconds=round(skipped, 2),
+                    from_seconds=round(before, 2),
+                )
+                self._no_progress_rounds = 0
+                self._giving_up_on_window = True
+                self._needs_recheck = False
+        return result
+
+    def _process_window(self, start_sample: int, end_sample: int, final: bool) -> Optional[dict]:
         window_start = start_sample / float(SAMPLE_RATE)
         window_end = end_sample / float(SAMPLE_RATE)
-        stable_until = max(window_start, window_end - float(self.config.overlap_seconds))
-        step_seconds = self.step_samples / float(SAMPLE_RATE)
+        chunk_result = self._infer_range(start_sample, end_sample)
+        if chunk_result is None:
+            return None
+        self._error_retries = 0
+
+        segments = self._absolute_segments(chunk_result, window_start)
+        words = normalize_words(segments, window_start, window_end, self.counters, self.log_degraded)
+
+        # 縮退（word 情報が無く segment 全体を擬似 word として扱う）時に既確定と重なると、
+        # テキスト系列で照合できず分割もできない。未確定区間だけを再推論して重なりを消す。
+        if any(w.pseudo and w.start < self.committed_until_seconds - EPS for w in words) \
+                and self.committed_until_seconds < window_end - EPS:
+            reinfer_start = max(start_sample, int(round(self.committed_until_seconds * SAMPLE_RATE)))
+            if reinfer_start < end_sample:
+                self.counters.reinferred_count += 1
+                self.log_degraded(
+                    DegradeReason.REINFER_UNCONFIRMED_RANGE,
+                    window=f"{window_start:.2f}-{window_end:.2f}",
+                    reinfer_from=round(reinfer_start / SAMPLE_RATE, 2),
+                )
+                again = self._infer_range(reinfer_start, end_sample)
+                if again is None:
+                    self.log_degraded(DegradeReason.REINFER_FAILED)
+                    return None
+                chunk_result = again
+                window_start = reinfer_start / float(SAMPLE_RATE)
+                segments = self._absolute_segments(chunk_result, window_start)
+                words = normalize_words(segments, window_start, window_end,
+                                        self.counters, self.log_degraded)
+
+        stable_until = window_end if final else max(window_start,
+                                                    window_end - float(self.config.overlap_seconds))
+        anchor = self.committed_words[-ANCHOR_WORDS:]
+        fresh = trim_committed(words, self.committed_until_seconds, anchor,
+                               self.counters, self.log_degraded)
+        confirm, pending = classify_words(fresh, window_start, stable_until,
+                                          self.counters, self.log_degraded)
 
         self.processed_samples = max(self.processed_samples, end_sample)
         self.processed_audio_seconds = self.processed_samples / float(SAMPLE_RATE)
         self.last_transcription_at = _timestamp()
 
-        return self._apply_window_result(
+        return self._apply_word_window(
             chunk_result,
+            confirm=confirm,
+            pending=pending,
             window_start=window_start,
             window_end=window_end,
             stable_until=stable_until,
-            step_seconds=step_seconds,
-            duration=window_end,
         )
+
+    def _apply_word_window(
+        self,
+        chunk_result: dict,
+        *,
+        confirm: list,
+        pending: list,
+        window_start: float,
+        window_end: float,
+        stable_until: float,
+    ) -> dict:
+        """確定語をコミットし、差分を含む結果を作る。"""
+        self.window_index += 1
+        committed_text_before = self.committed_text
+        committed_until_before = self.committed_until_seconds
+
+        committed_append = ""
+        for word in confirm:
+            committed_append = f"{committed_append}{word.text}"
+            self.committed_segments.append({"start": word.start, "end": word.end, "text": word.text})
+            self.committed_words.append(word)
+            self.committed_until_seconds = max(self.committed_until_seconds, word.end)
+        # アンカーに必要なぶんだけ保持する（状態量を録音時間に依存させない）。
+        if len(self.committed_words) > ANCHOR_WORDS:
+            del self.committed_words[: len(self.committed_words) - ANCHOR_WORDS]
+
+        committed_append = committed_append.strip()
+        if committed_append:
+            self.committed_text = _join_transcript(self.committed_text, committed_append)
+            self._append_to_file(committed_append)
+
+        self.pending_words = pending
+        self.partial_segments = [{"start": w.start, "end": w.end, "text": w.text} for w in pending]
+        self.partial_text = "".join(w.text for w in pending).strip()
+        self.final_text = self.committed_text
+
+        if self.committed_text.startswith(committed_text_before):
+            committed_delta = self.committed_text[len(committed_text_before):]
+            needs_snapshot = False
+        else:
+            committed_delta = ""
+            needs_snapshot = True
+
+        step_seconds = self.step_samples / float(SAMPLE_RATE)
+        return {
+            "type": "result",
+            "partial": self.partial_text,
+            "final": committed_append,
+            "committed_append": committed_append,
+            "committed_text": self.committed_text,
+            "committed_delta": committed_delta,
+            "committed_length_before": len(committed_text_before),
+            "committed_length": len(self.committed_text),
+            "needs_snapshot": needs_snapshot,
+            "partial_text": self.partial_text,
+            "committed_until": self.committed_until_seconds,
+            "committed_until_before": committed_until_before,
+            "stable_until": stable_until,
+            "commit_segment_count": len(confirm),
+            "partial_segment_count": len(pending),
+            "classification_warning": None,
+            "segments": [{"start": w.start, "end": w.end, "text": w.text} for w in confirm + pending],
+            "display_text": f"{self.committed_text}{self.partial_text}".strip(),
+            "timestamp": _timestamp(),
+            "saved_path": self.saved_path,
+            "model": chunk_result["model"],
+            "rms": chunk_result["rms"],
+            "duration_seconds": window_end,
+            "received_audio_seconds": self.received_audio_seconds,
+            "processed_audio_seconds": self.processed_audio_seconds,
+            "window_start": window_start,
+            "window_end": window_end,
+            "overlap_seconds": float(self.config.overlap_seconds),
+            "new_audio_start": max(0.0, window_end - max(step_seconds, 1.0)),
+            "new_audio_end": window_end,
+            "session_id": self.session_id,
+            "window_index": self.window_index,
+            "result_id": f"{self.session_id}:{self.window_index}",
+            "skipped": not committed_append and not self.partial_text,
+            "skip_reason": chunk_result["skip_reason"],
+            "debug_path": None,
+            "debug_wav_path": chunk_result.get("debug_wav_path"),
+            "lag_seconds": round(self.lag_seconds, 2),
+            "dropped_seconds": round(self.dropped_seconds, 2),
+            "counters": self.counters.as_dict(),
+        }
+
+    # ------------------------------------------------------------------
+    # 停止時の排出
+    # ------------------------------------------------------------------
+
+    def drain_on_stop(self) -> list[dict]:
+        """停止後、確定端から音声終端まで取り逃しなく走査して確定する。
+
+        終了条件:
+          1. probe が音声終端へ到達（正常）
+          2. pending が空で確定端が終端に達した（正常）
+          3. DRAIN_MAX_WINDOWS に到達（異常。回収できなかった秒数を記録）
+        """
+        results: list[dict] = []
+        total = self.pcm.total_samples
+        probe = int(round(self.committed_until_seconds * SAMPLE_RATE))
+        probe = max(probe, self.pcm.earliest_sample)
+        guard = 0
+        min_advance = self._min_advance_samples()
+
+        while probe < total - int(MIN_FLUSH_TAIL_SECONDS * SAMPLE_RATE) and guard < DRAIN_MAX_WINDOWS:
+            guard += 1
+            self.counters.drain_window_count += 1
+            end = min(probe + self.chunk_samples, total)
+            start = max(self.pcm.earliest_sample, max(0, end - self.chunk_samples))
+            if end <= start:
+                break
+            before = self.committed_until_seconds
+            # stable = window_end。停止後は overlap を残す理由がないので全て確定可能。
+            result = self._process_window(start, end, final=True)
+            if result is not None:
+                results.append(result)
+                # 排出時は保留を残さない。強制確定として記録する。
+                if self.pending_words:
+                    forced = self.pending_words
+                    self.pending_words = []
+                    for word in forced:
+                        self.counters.forced_commit_count += 1
+                        self.log_degraded(
+                            DegradeReason.FORCED_COMMIT_PENDING,
+                            start=round(word.start, 3),
+                            end=round(word.end, 3),
+                            pseudo=word.pseudo,
+                        )
+                    tail = self._apply_word_window(
+                        {"model": self.config.model, "rms": 0.0, "skip_reason": "",
+                         "debug_wav_path": None, "segments": []},
+                        confirm=forced, pending=[],
+                        window_start=forced[0].start, window_end=forced[-1].end,
+                        stable_until=forced[-1].end,
+                    )
+                    results.append(tail)
+            if self.committed_until_seconds > before + EPS:
+                probe = int(round(self.committed_until_seconds * SAMPLE_RATE))
+            else:
+                # この窓では何も確定できなかった（無音 or 推論失敗）。
+                # 打ち切らず最小前進で先へ進め、全区間を必ず走査する。
+                probe += min_advance
+
+        if guard >= DRAIN_MAX_WINDOWS:
+            self.log_degraded(DegradeReason.DRAIN_LIMIT_REACHED, windows=guard)
+        unrecovered = max(0.0, (total - max(probe, int(round(self.committed_until_seconds * SAMPLE_RATE))))
+                          / float(SAMPLE_RATE))
+        if unrecovered > MIN_FLUSH_TAIL_SECONDS:
+            self.counters.unrecovered_seconds = unrecovered
+            self.log_degraded(DegradeReason.DRAIN_UNRECOVERED, seconds=round(unrecovered, 2))
+        return results
 
     def flush_tail(self) -> Optional[dict]:
-        """停止時、カーソルより先の端切れを回収する（現状は無言で捨てられている）。"""
-        total = self.pcm.total_samples
-        committed_samples = int(round(self.committed_until_seconds * SAMPLE_RATE))
-        if total - committed_samples < int(MIN_FLUSH_TAIL_SECONDS * SAMPLE_RATE):
-            return None
-
-        start = max(self.pcm.earliest_sample, max(0, total - self.chunk_samples))
-        if total <= start:
-            return None
-        pcm = self.pcm.read(start, total)
-        if pcm is None:
-            return None
-
-        chunk_result = transcribe_pcm16(pcm, self.config.model)
-        window_start = start / float(SAMPLE_RATE)
-        window_end = total / float(SAMPLE_RATE)
-        self.processed_samples = max(self.processed_samples, total)
-        self.processed_audio_seconds = self.processed_samples / float(SAMPLE_RATE)
-        self.last_transcription_at = _timestamp()
-        # 停止時は overlap を残す理由がないので、末尾まで確定させる。
-        return self._apply_window_result(
-            chunk_result,
-            window_start=window_start,
-            window_end=window_end,
-            stable_until=window_end,
-            step_seconds=self.step_samples / float(SAMPLE_RATE),
-            duration=window_end,
-        )
+        """後方互換のため残す。drain_on_stop の最後の結果を返す。"""
+        results = self.drain_on_stop()
+        return results[-1] if results else None
 
     # ------------------------------------------------------------------
     # レガシー webm 経路

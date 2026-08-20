@@ -31,6 +31,10 @@ HALLUCINATION_PHRASES = {
 
 # realtime の推論パラメータ。wav 経路と PCM 経路で認識挙動を一致させるため 1 箇所に集約する
 # （片方だけ変えると同じ音声で結果が変わる）。
+# word_timestamps: 確定境界を word 単位で決めるために必須。
+#   segment 単位だと確定線をまたぐ segment のテキストが失われる
+#   （確定線は次 window の開始時刻と一致するため再評価の機会がない）。
+#   実測コスト +6〜7%（small / 10秒窓で 1.86s -> 1.96s）。
 TRANSCRIBE_KWARGS = {
     "language": "ja",
     "beam_size": 3,
@@ -40,6 +44,7 @@ TRANSCRIBE_KWARGS = {
     "no_speech_threshold": NO_SPEECH_THRESHOLD,
     "log_prob_threshold": LOGPROB_THRESHOLD,
     "compression_ratio_threshold": COMPRESSION_RATIO_THRESHOLD,
+    "word_timestamps": True,
 }
 
 _model_cache: Dict[str, object] = {}
@@ -168,6 +173,22 @@ def _write_debug_pcm(pcm_bytes: bytes, sample_rate: int = SAMPLE_RATE) -> str:
     return str(target)
 
 
+def _extract_words(segment) -> list:
+    """segment から word 情報を取り出す。取得できない場合は空リストを返す。
+
+    値の検証・クランプは services.word_commit.normalize_words 側で行う。
+    ここでは faster-whisper の属性名を辞書へ写すだけに留める。
+    """
+    words = []
+    for word in (getattr(segment, "words", None) or []):
+        words.append({
+            "start": getattr(word, "start", None),
+            "end": getattr(word, "end", None),
+            "text": str(getattr(word, "word", "") or ""),
+        })
+    return words
+
+
 def _collect_segments(segments) -> tuple[str, list, list]:
     """segment 列から採用テキスト・採用セグメント・除外理由を取り出す。
 
@@ -208,6 +229,7 @@ def _collect_segments(segments) -> tuple[str, list, list]:
             "start": float(getattr(segment, "start", 0.0) or 0.0),
             "end": float(getattr(segment, "end", 0.0) or 0.0),
             "text": text,
+            "words": _extract_words(segment),
         })
     return "".join(accepted_texts).strip(), accepted_segments, dropped_reasons
 

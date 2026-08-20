@@ -547,6 +547,7 @@ def _metrics_message(result: dict, inference_ms: int) -> dict:
         "dropped_seconds": result.get("dropped_seconds", 0.0),
         "skip_reason": result.get("skip_reason") or "",
         "timestamp": result["timestamp"],
+        **(result.get("counters") or {}),
     }
 
 
@@ -783,14 +784,14 @@ async def live_transcribe(websocket: WebSocket):
                         session.stopping = True
                         stop_event.set()
                         await driver
-                        # カーソルより先の端切れ（従来は無言で捨てられていた）を回収する。
+                        # 確定端から音声終端まで排出する（取り逃しを残さない）。
                         try:
-                            tail = await asyncio.to_thread(session.flush_tail)
+                            tails = await asyncio.to_thread(session.drain_on_stop)
                         except Exception as exc:
-                            print(f"[WS] WARN flush_tail failed: {exc}", flush=True)
-                            tail = None
-                        if tail is not None:
-                            await outbox.put(_update_message(tail))
+                            print(f"[WS] WARN drain_on_stop failed: {exc}", flush=True)
+                            tails = []
+                        for tail in tails:
+                            await _emit_window(session, outbox, tail, 0)
                         final_result = session.finalize()
                         print(
                             f"[WS] session_final session={session.session_id} "
@@ -813,6 +814,7 @@ async def live_transcribe(websocket: WebSocket):
                                 "audio_path": recorder.path if recorder is not None else None,
                                 "recorded_seconds": final_result["recorded_seconds"],
                                 "dropped_seconds": final_result["dropped_seconds"],
+                                "counters": final_result.get("counters"),
                             }
                         )
                         stopped_normally = True

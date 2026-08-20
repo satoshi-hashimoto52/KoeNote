@@ -127,21 +127,34 @@ class TimestampParityTest(unittest.TestCase):
         self.assertEqual(second["final"], "B C")
         self.assertEqual(session.committed_text, "AB C")
         self.assertEqual(session.partial_text, "D")
-        self.assertEqual(session.finalize()["committed_text"], "AB CD")
+        # finalize は無条件追記しない。末尾は drain_on_stop が同じ判定で確定させる。
+        with patch("services.live_session.transcribe_pcm16",
+                   return_value={**stub_result(), "text": "D",
+                                 "segments": [{"start": 4.0, "end": 5.0, "text": "D"}]}):
+            session.drain_on_stop()
+        self.assertIn("D", session.finalize()["committed_text"])
+        self.assertEqual(session.pending_words, [])
         self.assertIsNotNone(session.last_audio_received_at)
         self.assertIsNotNone(session.last_transcription_at)
 
-    def test_text_is_kept_as_partial_when_segment_timestamps_are_missing(self):
+    def test_segment_without_words_becomes_a_pseudo_word(self):
+        """word 情報が無い segment は擬似 word になり、確定/保留の通常経路に載る。
+
+        segment 全体を無条件に確定も破棄もしない。
+        """
         session = make_session(chunk_seconds=5, overlap_seconds=1)
         with patch("services.live_session.transcribe_pcm16",
-                   return_value=stub_result(text="認識結果", start=0, end=0) | {"segments": []}):
+                   return_value={**stub_result(),
+                                 "text": "認識結果",
+                                 "segments": [{"start": 0.0, "end": 3.0, "text": "認識結果"}]}):
             while session.pcm.total_samples < 5 * SAMPLE_RATE:
                 session.append_pcm(loud_frame())
             payload = session.run_window(*session.plan_window())
 
-        self.assertEqual(payload["committed_append"], "")
-        self.assertEqual(payload["partial_text"], "認識結果")
-        self.assertTrue(payload["classification_warning"])
+        self.assertEqual(session.counters.pseudo_word_count, 1)
+        self.assertGreaterEqual(session.counters.degraded_window_count, 1)
+        # stable_until=4 なので [0,3] の擬似 word は確定される
+        self.assertEqual(payload["committed_append"], "認識結果")
 
 
 class CommittedDeltaTest(unittest.TestCase):
@@ -301,18 +314,16 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class KnownSegmentBoundaryDefectTest(unittest.TestCase):
-    """既知の欠陥（本タスクの範囲外）を記録するテスト。
+class SegmentBoundaryRegressionTest(unittest.TestCase):
+    """確定線をまたぐ segment のテキストが失われないことの回帰テスト。
 
-    window の stable_until をまたぐ長い segment は「次の window で再評価する」
-    設計になっているが、次の window がその segment の開始より後から始まる場合、
-    再評価される機会がないまま確定もされず、テキストが失われる。
+    stable_until は次 window の開始時刻と数学的に一致するため、segment 単位の
+    「確定線までに終わったものだけ確定する」判定では、またぐ segment が
+    再評価されないまま消えていた（docs/issues/0001）。
+    word 単位の確定に変えることで解消される。
 
-    レガシー webm 経路（transcribe_chunk）でも全く同じ結果になることを確認済みで、
-    PCM 化による回帰ではない。修正はコミット判定アルゴリズムの再設計を伴い、
-    誤ると文字起こし品質そのものを損なうため、別作業として切り出す。
-
-    修正されたらこのテストは「予期しない成功」として報告され、削除の合図になる。
+    レガシー webm 経路は当時の挙動を保った回帰用フィクスチャなので、
+    そちらは従来どおり欠落することを併せて確認する。
     """
 
     WINDOWS = [
@@ -335,12 +346,8 @@ class KnownSegmentBoundaryDefectTest(unittest.TestCase):
                 session.advance_cursor(plan[1])
         return session.finalize()["committed_text"]
 
-    def test_current_behaviour_loses_the_straddling_segment(self):
-        # 現状の挙動をここに固定しておく。意図せず変わったら気付けるようにする。
-        self.assertEqual(self._run_pcm_windows(), "前半後半")
-
-    @unittest.expectedFailure
-    def test_straddling_segment_should_not_be_lost(self):
+    def test_straddling_segment_is_not_lost(self):
+        """word 単位確定により、確定線をまたぐ segment も失われない。"""
         self.assertIn("中間", self._run_pcm_windows())
 
     def test_legacy_webm_path_loses_it_identically(self):

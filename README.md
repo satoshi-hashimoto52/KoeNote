@@ -162,6 +162,74 @@ compression_ratio > 2.4                          -> 繰り返し/ハルシネー
 `model.transcribe` へ渡す値と一致させる（ずれると「whisper が返したのに
 こちらで捨てる」不整合になる）。回帰テストは `backend/tests/test_no_speech_filter.py`。
 
+### 確定アルゴリズム（word 単位）
+
+確定線 `stable_until` は次 window の開始時刻と**数学的に一致する**
+（`window_end - overlap == window_start + step`）。そのため segment 単位で
+「確定線までに終わったものだけ確定する」判定にすると、確定線をまたぐ segment は
+保留のまま次 window に含まれず、テキストが失われる（`docs/issues/0001`）。
+segment 単位で捨てる／丸ごと確定するどちらも欠落か重複を生むため、
+**word timestamp 単位で確定する**。
+
+判定の優先順:
+
+1. **主判定 = 絶対音声時刻と確定済み音声境界**。
+   `word.end <= committed_until - JITTER_MAX` の語は無条件に既確定とみなす。
+2. **補助 = 曖昧帯（`committed_until ± JITTER_MAX`）内の位置決めのみ**。
+   確定済み末尾（アンカー6語）と単調に接頭辞一致する分だけ既確定として除く。
+   同じ語が密に連続する場合はテキストが全部一致してしまうため、
+   一致長ではなく**時刻差が最小になる整合**を選ぶ。
+
+文字列一致そのものを重複除去の根拠にはしない。「はい、はい」のような正当な
+繰り返しを消してしまうため。句読点・空白（半角/全角）だけの差はアンカー照合時に
+正規化して無視するが、長音符「ー」や「々」など語の一部になる文字は残す。
+
+カーソル更新式:
+
+```
+pending なし: next_end = prev_end + step
+pending あり: next_end = min(prev_end + step,
+                            round((pending[0].start - CURSOR_MARGIN) * SR) + chunk)
+共通        : next_end <= prev_end なら prev_end + MIN_ADVANCE
+```
+
+`word.start <= window_start` の語は「これより前から始まる window が今後存在しない」
+ため強制確定する。これにより `pending[0].start > window_start` が保証され、
+カーソルの前進が保証される（追従のみの実装はここで停滞する）。
+
+停止時は `drain_on_stop` が確定端から音声終端まで走査して確定させる。
+`finalize` は `partial_text` を無条件に追記しない（既確定分の二重書き込みになるため）。
+
+word timestamp が取得できない segment は「segment 全体を1語とする擬似 word」として
+通常の判定経路に載せる。全確定も全破棄もしない。擬似 word が既確定と重なる場合は
+未確定区間だけを再推論して重なり自体を無くす。縮退はすべて reason コード付きで
+`diagnostics.log` と WS `warning` に記録する。
+
+### word timestamp のずれの再測定
+
+`JITTER_MAX_SECONDS` と `CURSOR_MARGIN_SECONDS`（`backend/services/word_commit.py` で
+一元管理）は実測に基づく**暫定的な設計値**である。
+
+測定条件（現在の値の根拠）:
+
+- モデル `small`、`word_timestamps=True`、`vad_filter=True`
+- 音声2種: 句読点あり 22.5秒 / 無音の少ない長文 32.3秒（`say -v Kyoko` 生成）
+- chunk 6 / 8 / 10 / 12 秒、窓開始 0〜8 秒、対応 768 語
+- 結果: 中央値 0.000s / p95 0.080s / p99 0.180s / **実測最大 0.440s**
+- よって実測最大を上回る **0.5s** を採用
+
+モデル・話者・録音環境・推論パラメータを変えたら再測定して見直すこと。
+
+```bash
+say -v Kyoko -o sample.aiff "本日の会議を始めます。..."
+ffmpeg -y -i sample.aiff -ac 1 -ar 16000 -f s16le sample.pcm
+.venv/bin/python scripts/measure_word_jitter.py sample.pcm
+.venv/bin/python scripts/measure_word_jitter.py sample.pcm --model medium --chunks 8 10 12
+```
+
+語の対応付けは「単調 + 時刻局所 + テキスト一致」の制約付き DP で行う。
+テキスト一致だけで対応付けると繰り返し語を誤対応し、3 秒級の偽の外れ値が出る。
+
 ### 異常検知と保全
 
 - **録音音声は文字起こしとは別系統**で `<session>/audio/recording.wav` へ逐次保存。
@@ -188,6 +256,10 @@ npm run test:backend
 - `test_live_session.py` — レガシー webm 経路の committed/partial 契約（回帰ガード）
 - `test_live_session_pcm.py` — 窓のケイデンス・差分の正しさ・追いつき・
   **2時間連続でメモリと1周期コストが増えないこと**
+- `test_word_commit.py` — word 単位確定の不変条件（全 word が厳密に1回・
+  カーソルの前進・drain 後に未確定なし・確定済みは不変）。
+  確定線をまたぐ segment / 境界語 / 無音なし長文 / 同一語の連続 /
+  表記ゆれ / 縮退5種 / 1時間相当の状態量 / 実行の再現性を全プリセットで検証
 - `test_pcm_stream.py` — リングバッファの絶対番号・破棄時 `None`・有界性・リサンプラ
 - `test_wav_recorder.py` — 強制終了しても再生可能な WAV・ヘッダ復旧
 - `test_live_ws_protocol.py` — 推論中も heartbeat が届く／差分のみ送る／resync／再接続の継続
@@ -210,13 +282,6 @@ npm run test:backend
   読み込めるかを確認する（キャプチャ方式を変えるときは必ず先に実行）
 - `scripts/pcm_pipeline_check.cjs` — Renderer → Backend の PCM 経路を通しで検証
 
-### 既知の不具合（未修正）
-
-窓の `stable_until` をまたぐ長い segment が、次の窓に含まれない場合に
-テキストが失われることがある。レガシー webm 経路でも同一の結果になるため
-PCM 化による回帰ではない（`test_live_session_pcm.py` の
-`KnownSegmentBoundaryDefectTest` に再現を記録）。修正はコミット判定
-アルゴリズムの再設計を伴う。
 
 ## 配布
 
