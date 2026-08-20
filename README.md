@@ -141,6 +141,27 @@ AudioContext(16kHz)                       _receiver     : PCM を追記するだ
 - リアルタイム経路は **ffmpeg を使わない**（faster-whisper に numpy 配列を直接渡す）。
   ffmpeg は音声ファイルからの文字起こしにのみ必要。
 
+### segment の品質判定（無音の扱い）
+
+無音判定は faster-whisper 本体と同じ**複合条件**で行う。
+
+```
+no_speech_prob > 0.6  かつ  avg_logprob < -1.0   -> 無音として除外
+avg_logprob < -1.0                              -> 確信度不足として除外
+compression_ratio > 2.4                          -> 繰り返し/ハルシネーションとして除外
+ハルシネーション語句に一致                        -> 除外
+```
+
+`no_speech_prob` **単独**で segment を破棄してはいけない。realtime では窓が語の途中から
+始まるため `no_speech_prob` が閾値をわずかに超えやすく（実測 0.62〜0.84）、単独判定では
+`avg_logprob` -0.16 のような確信度の高い音声まで segment ごと捨てられる。
+実測では 4 窓連続で約 16 秒の発話が失われ、無音境界のない発話ほど悪化した。
+
+閾値は `backend/services/live_transcriber.py` の `NO_SPEECH_THRESHOLD` /
+`LOGPROB_THRESHOLD` / `COMPRESSION_RATIO_THRESHOLD` で一元管理し、
+`model.transcribe` へ渡す値と一致させる（ずれると「whisper が返したのに
+こちらで捨てる」不整合になる）。回帰テストは `backend/tests/test_no_speech_filter.py`。
+
 ### 異常検知と保全
 
 - **録音音声は文字起こしとは別系統**で `<session>/audio/recording.wav` へ逐次保存。

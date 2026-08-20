@@ -16,6 +16,11 @@ from .transcriber import resolve_ffmpeg_dir
 SUPPORTED_MODELS = {"tiny", "base", "small", "medium"}
 DEFAULT_MODEL = "small"
 MIN_RMS = 0.006
+
+# segment の品質判定に使う閾値。model.transcribe へ渡す値と揃える。
+NO_SPEECH_THRESHOLD = 0.6
+LOGPROB_THRESHOLD = -1.0
+COMPRESSION_RATIO_THRESHOLD = 2.4
 HALLUCINATION_PHRASES = {
     "ご視聴ありがとうございました",
     "ご清聴ありがとうございました",
@@ -32,9 +37,9 @@ TRANSCRIBE_KWARGS = {
     "vad_filter": True,
     "temperature": 0,
     "condition_on_previous_text": False,
-    "no_speech_threshold": 0.6,
-    "log_prob_threshold": -1.0,
-    "compression_ratio_threshold": 2.4,
+    "no_speech_threshold": NO_SPEECH_THRESHOLD,
+    "log_prob_threshold": LOGPROB_THRESHOLD,
+    "compression_ratio_threshold": COMPRESSION_RATIO_THRESHOLD,
 }
 
 _model_cache: Dict[str, object] = {}
@@ -178,13 +183,21 @@ def _collect_segments(segments) -> tuple[str, list, list]:
         no_speech_prob = float(getattr(segment, "no_speech_prob", 0.0) or 0.0)
         avg_logprob = float(getattr(segment, "avg_logprob", 0.0) or 0.0)
         compression_ratio = float(getattr(segment, "compression_ratio", 0.0) or 0.0)
-        if no_speech_prob > 0.6:
-            dropped_reasons.append(f"no_speech_prob={no_speech_prob:.2f}")
+        # 無音判定は no_speech_prob 単独では行わない。
+        # realtime では窓が語の途中から始まるため no_speech_prob が閾値をわずかに超えやすく
+        # （実測 0.62〜0.84）、単独判定では avg_logprob -0.16 のような確信度の高い音声まで
+        # segment ごと破棄され、無音境界のない発話が数十秒まとめて失われる。
+        # faster-whisper 自身の判定も「no_speech_prob が高く かつ avg_logprob が低い」の
+        # 同時成立で無音とみなすため、その意味論に合わせる。
+        if no_speech_prob > NO_SPEECH_THRESHOLD and avg_logprob < LOGPROB_THRESHOLD:
+            dropped_reasons.append(
+                f"silence(no_speech={no_speech_prob:.2f},logprob={avg_logprob:.2f})"
+            )
             continue
-        if avg_logprob < -1.0:
+        if avg_logprob < LOGPROB_THRESHOLD:
             dropped_reasons.append(f"avg_logprob={avg_logprob:.2f}")
             continue
-        if compression_ratio > 2.4:
+        if compression_ratio > COMPRESSION_RATIO_THRESHOLD:
             dropped_reasons.append(f"compression_ratio={compression_ratio:.2f}")
             continue
         if _is_hallucination_text(text):
