@@ -1,3 +1,18 @@
+export interface BackendExitInfo {
+  code: number | null;
+  signal: string | null;
+  reason: string;
+  logTail: string;
+}
+
+export interface AnomalyInfo {
+  reason: string;
+  detail: string;
+  sessionDir?: string | null;
+  transcriptPath?: string | null;
+  atSeconds?: number;
+}
+
 export interface BridgeApi {
   backendOrigin: string;
   wsOrigin: string;
@@ -11,7 +26,12 @@ export interface BridgeApi {
   openExternal(url: string): Promise<{ ok: boolean; reason?: string }>;
   writeClipboard(text: string): Promise<boolean>;
   getBackendLog(): Promise<string>;
+  restartBackend(): Promise<{ ok: boolean }>;
+  appendTranscriptNotice(path: string, text: string): Promise<{ ok: boolean; reason?: string }>;
   setRecordingState(recording: boolean): void;
+  notifyAnomaly(info: AnomalyInfo): void;
+  onBackendExited(callback: (info: BackendExitInfo) => void): () => void;
+  onBackendRestartRequested(callback: () => void): () => void;
 }
 
 declare global {

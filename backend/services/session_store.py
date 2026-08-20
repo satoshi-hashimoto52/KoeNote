@@ -17,6 +17,8 @@ SEGMENTS_FILENAME = "transcript_segments.json"
 SESSION_FILENAME = "session.json"
 ATTACHMENTS_FILENAME = "attachments.json"
 DIAGNOSTICS_FILENAME = "diagnostics.log"
+AUDIO_DIRNAME = "audio"
+RAW_AUDIO_FILENAME = "recording.wav"
 
 # ファイル名に使えない/避けたい文字を安全な文字へ置換する。
 _FORBIDDEN = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
@@ -107,6 +109,8 @@ def create_meeting_directory(
         "ended_at": None,
         "transcript_path": TRANSCRIPT_FILENAME,
         "segments_path": SEGMENTS_FILENAME,
+        # 録音音声は文字起こしとは別系統で保存する（推論が落ちても録音は残る）。
+        "audio_path": f"{AUDIO_DIRNAME}/{RAW_AUDIO_FILENAME}",
         "attachments": list(attachments),
     }
     write_session(meeting_dir, session)
@@ -118,6 +122,7 @@ def create_meeting_directory(
         "session_json_path": str(meeting_dir / SESSION_FILENAME),
         "attachments_json_path": str(meeting_dir / ATTACHMENTS_FILENAME),
         "diagnostics_path": str(meeting_dir / DIAGNOSTICS_FILENAME),
+        "audio_path": str(meeting_dir / AUDIO_DIRNAME / RAW_AUDIO_FILENAME),
         "transcript_filename": TRANSCRIPT_FILENAME,
         "session": session,
     }
@@ -152,6 +157,11 @@ def finalize_session(meeting_dir: str, status: str = "done", ended_at: Optional[
     session["ended_at"] = ended_at or _now_iso()
     write_session(Path(meeting_dir), session)
     return session
+
+
+def raw_audio_path(meeting_dir) -> Path:
+    """セッションフォルダ内の録音音声ファイルのパス。"""
+    return Path(meeting_dir) / AUDIO_DIRNAME / RAW_AUDIO_FILENAME
 
 
 def append_diagnostics(meeting_dir: str, message: str) -> None:

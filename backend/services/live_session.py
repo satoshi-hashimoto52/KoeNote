@@ -9,7 +9,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from .live_transcriber import DEFAULT_MODEL, SUPPORTED_MODELS, convert_webm_bytes_to_wav, transcribe_wav_file
+from .live_transcriber import (
+    DEFAULT_MODEL,
+    SUPPORTED_MODELS,
+    convert_webm_bytes_to_wav,
+    transcribe_pcm16,
+    transcribe_wav_file,
+)
+from .pcm_stream import BYTES_PER_SAMPLE, SAMPLE_RATE, PcmRingBuffer, Resampler16k
 from .transcriber import resolve_ffmpeg_dir
 
 
@@ -18,6 +25,13 @@ DELAY_PRESETS = {
     "balanced": {"chunk_seconds": 10.0, "overlap_seconds": 2.0},
     "accuracy": {"chunk_seconds": 12.0, "overlap_seconds": 3.0},
 }
+
+# 推論が遅れたときに音声を捨てずに追いつける猶予。180秒で約5.8MB（録音長に依存しない）。
+BUFFER_CAPACITY_SECONDS = 180.0
+# 停止時にこれ未満の端切れしか残っていなければ、無理に1窓回さない。
+MIN_FLUSH_TAIL_SECONDS = 0.5
+# 遅延がこれを超えたら overlap を捨ててスループットを稼ぐ（音声を落とす前の安全弁）。
+LAG_CATCHUP_THRESHOLD_SECONDS = 30.0
 
 
 def _clamp_float(value, default: float, minimum: float, maximum: float) -> float:
@@ -60,6 +74,8 @@ class LiveSessionConfig:
     mime_type: str = "audio/webm"
     debug_chunks: bool = False
     send_mode: str = "chunks"
+    sample_rate: int = SAMPLE_RATE
+    debug: bool = False
 
     @classmethod
     def from_payload(cls, payload: dict) -> "LiveSessionConfig":
@@ -81,6 +97,14 @@ class LiveSessionConfig:
             max(0.0, chunk_seconds - 0.1),
         )
         output_filename = str(payload.get("output_filename", "") or "").strip() or None
+        raw_send_mode = str(payload.get("send_mode", "")).lower()
+        if raw_send_mode == "pcm16":
+            send_mode = "pcm16"
+        elif raw_send_mode == "full":
+            send_mode = "full"
+        else:
+            send_mode = "chunks"
+        sample_rate = int(_clamp_float(payload.get("sample_rate"), SAMPLE_RATE, 8000.0, 192000.0))
         return cls(
             model=model,
             delay_mode=delay_mode if delay_mode in DELAY_PRESETS else "balanced",
@@ -91,11 +115,22 @@ class LiveSessionConfig:
             output_filename=output_filename,
             mime_type=str(payload.get("mime_type", "audio/webm") or "audio/webm"),
             debug_chunks=bool(payload.get("debug_chunks", False)),
-            send_mode="full" if str(payload.get("send_mode", "")).lower() == "full" else "chunks",
+            send_mode=send_mode,
+            sample_rate=sample_rate,
+            debug=bool(payload.get("debug", False)),
         )
 
 
 class LiveSession:
+    """1 回のリアルタイム文字起こしセッションの状態。
+
+    スレッド契約:
+      - ``append_pcm`` / ``plan_window`` / ``advance_cursor`` は event loop スレッドから呼ぶ。
+      - ``run_window`` / ``flush_tail`` は worker スレッドから、かつ同時に 1 本だけ呼ぶ。
+      - ``committed_*`` は ``run_window`` 内でのみ変更し、loop 側は ``await`` 復帰後に読む。
+      - PCM バッファは自身でロックを持つ。これ以外のロックは不要。
+    """
+
     def __init__(self, config: LiveSessionConfig, session_id: Optional[str] = None):
         self.config = config
         self.session_id = session_id or uuid.uuid4().hex
@@ -116,9 +151,28 @@ class LiveSession:
         self.received_audio_seconds = 0.0
         self.processed_audio_seconds = 0.0
         self.window_index = 0
+
+        # --- PCM 経路（録音長に依存しない構造） ---
+        self.pcm = PcmRingBuffer(capacity_seconds=BUFFER_CAPACITY_SECONDS)
+        self._resampler = (
+            Resampler16k(config.sample_rate) if config.sample_rate != SAMPLE_RATE else None
+        )
+        self.chunk_samples = max(int(round(config.chunk_seconds * SAMPLE_RATE)), SAMPLE_RATE)
+        step_seconds = max(float(config.chunk_seconds) - float(config.overlap_seconds), 1.0)
+        self.step_samples = max(int(round(step_seconds * SAMPLE_RATE)), SAMPLE_RATE)
+        self.next_window_end = self.chunk_samples
+        self.processed_samples = 0
+        self.dropped_samples = 0
+        self.degraded = False
+        self.stopping = False
+
         if config.write_to_file:
             self.saved_path = self._prepare_output_path(config.output_folder)
             self._file = open(self.saved_path, "a", encoding="utf-8")
+
+    # ------------------------------------------------------------------
+    # ライフサイクル
+    # ------------------------------------------------------------------
 
     def close(self) -> None:
         if self._file is not None:
@@ -143,9 +197,179 @@ class LiveSession:
             "session_id": self.session_id,
             "window_index": self.window_index,
             "saved_path": self.saved_path,
+            "recorded_seconds": self.recorded_seconds,
+            "dropped_seconds": self.dropped_seconds,
         }
 
+    # ------------------------------------------------------------------
+    # 進捗の参照（heartbeat / 診断表示用）
+    # ------------------------------------------------------------------
+
+    @property
+    def recorded_seconds(self) -> float:
+        return self.pcm.total_samples / float(SAMPLE_RATE)
+
+    @property
+    def dropped_seconds(self) -> float:
+        return self.dropped_samples / float(SAMPLE_RATE)
+
+    @property
+    def lag_seconds(self) -> float:
+        return max(0.0, (self.pcm.total_samples - self.processed_samples) / float(SAMPLE_RATE))
+
+    def progress_snapshot(self) -> dict:
+        return {
+            "received_audio_seconds": round(self.received_audio_seconds, 2),
+            "processed_audio_seconds": round(self.processed_audio_seconds, 2),
+            "recorded_seconds": round(self.recorded_seconds, 2),
+            "lag_seconds": round(self.lag_seconds, 2),
+            "dropped_seconds": round(self.dropped_seconds, 2),
+            "committed_length": len(self.committed_text),
+            "window_index": self.window_index,
+            "received_chunk_count": self.received_chunk_count,
+            "last_audio_received_at": self.last_audio_received_at,
+            "last_transcription_at": self.last_transcription_at,
+            "degraded": self.degraded,
+        }
+
+    # ------------------------------------------------------------------
+    # PCM 経路: 取り込み（event loop スレッド、必ず軽量）
+    # ------------------------------------------------------------------
+
+    def append_pcm(self, pcm: bytes) -> int:
+        """受信 PCM をリングバッファへ追記する。ここでは推論しない。"""
+        if not pcm:
+            return self.pcm.total_samples
+        if self._resampler is not None:
+            pcm = self._resampler.process(pcm)
+            if not pcm:
+                return self.pcm.total_samples
+        total = self.pcm.append(pcm)
+        self.received_chunk_count += 1
+        self.received_audio_bytes += len(pcm)
+        self.received_audio_seconds = total / float(SAMPLE_RATE)
+        self.last_audio_received_at = _timestamp()
+        return total
+
+    def append_gap(self, samples: int) -> int:
+        """再接続で失われた区間を無音で埋め、絶対時刻を壁時計に合わせ続ける。"""
+        if samples <= 0:
+            return self.pcm.total_samples
+        total = self.pcm.append_silence(samples)
+        self.dropped_samples += samples
+        self.received_audio_seconds = total / float(SAMPLE_RATE)
+        return total
+
+    # ------------------------------------------------------------------
+    # PCM 経路: 窓の決定（event loop スレッド）
+    # ------------------------------------------------------------------
+
+    def _effective_step(self) -> int:
+        # 遅れているときは overlap を捨てて追いつく（音声を落とすより先に試す手）。
+        if self.lag_seconds > LAG_CATCHUP_THRESHOLD_SECONDS:
+            return self.chunk_samples
+        return self.step_samples
+
+    def plan_window(self) -> Optional[tuple[int, int]]:
+        """次に処理すべき窓 [start, end) を絶対サンプル番号で返す。
+
+        ``window_end`` を常に「最新の音声」にすると、推論が遅れた分の音声が
+        無言で文字起こしされないまま消える。カーソルを step ずつ進めることで、
+        遅れても順に消化して取りこぼさない。
+        """
+        total = self.pcm.total_samples
+        if total < self.next_window_end:
+            return None
+
+        earliest = self.pcm.earliest_sample
+        start = max(0, self.next_window_end - self.chunk_samples)
+        if start < earliest:
+            # バッファ容量を超えて遅れた。落とす分を計上してから前方へ飛ぶ。
+            skip_to = earliest + self.chunk_samples
+            self.dropped_samples += max(0, skip_to - self.next_window_end)
+            self.degraded = True
+            self.next_window_end = skip_to
+            if total < self.next_window_end:
+                return None
+            start = max(0, self.next_window_end - self.chunk_samples)
+        return (start, self.next_window_end)
+
+    def advance_cursor(self, end_sample: int) -> None:
+        self.next_window_end = end_sample + self._effective_step()
+
+    # ------------------------------------------------------------------
+    # PCM 経路: 推論（worker スレッド、同時 1 本）
+    # ------------------------------------------------------------------
+
+    def run_window(self, start_sample: int, end_sample: int) -> Optional[dict]:
+        """[start, end) を文字起こしして結果を返す。破棄済み区間なら None。"""
+        pcm = self.pcm.read(start_sample, end_sample)
+        if pcm is None:
+            return None
+
+        chunk_result = transcribe_pcm16(
+            pcm,
+            self.config.model,
+            debug_save=self.config.debug_chunks,
+        )
+        window_start = start_sample / float(SAMPLE_RATE)
+        window_end = end_sample / float(SAMPLE_RATE)
+        stable_until = max(window_start, window_end - float(self.config.overlap_seconds))
+        step_seconds = self.step_samples / float(SAMPLE_RATE)
+
+        self.processed_samples = max(self.processed_samples, end_sample)
+        self.processed_audio_seconds = self.processed_samples / float(SAMPLE_RATE)
+        self.last_transcription_at = _timestamp()
+
+        return self._apply_window_result(
+            chunk_result,
+            window_start=window_start,
+            window_end=window_end,
+            stable_until=stable_until,
+            step_seconds=step_seconds,
+            duration=window_end,
+        )
+
+    def flush_tail(self) -> Optional[dict]:
+        """停止時、カーソルより先の端切れを回収する（現状は無言で捨てられている）。"""
+        total = self.pcm.total_samples
+        committed_samples = int(round(self.committed_until_seconds * SAMPLE_RATE))
+        if total - committed_samples < int(MIN_FLUSH_TAIL_SECONDS * SAMPLE_RATE):
+            return None
+
+        start = max(self.pcm.earliest_sample, max(0, total - self.chunk_samples))
+        if total <= start:
+            return None
+        pcm = self.pcm.read(start, total)
+        if pcm is None:
+            return None
+
+        chunk_result = transcribe_pcm16(pcm, self.config.model)
+        window_start = start / float(SAMPLE_RATE)
+        window_end = total / float(SAMPLE_RATE)
+        self.processed_samples = max(self.processed_samples, total)
+        self.processed_audio_seconds = self.processed_samples / float(SAMPLE_RATE)
+        self.last_transcription_at = _timestamp()
+        # 停止時は overlap を残す理由がないので、末尾まで確定させる。
+        return self._apply_window_result(
+            chunk_result,
+            window_start=window_start,
+            window_end=window_end,
+            stable_until=window_end,
+            step_seconds=self.step_samples / float(SAMPLE_RATE),
+            duration=window_end,
+        )
+
+    # ------------------------------------------------------------------
+    # レガシー webm 経路
+    # ------------------------------------------------------------------
+
     def transcribe_chunk(self, audio_bytes: bytes) -> dict:
+        """レガシー webm 経路。送信済み音声を毎回全体デコードするため O(T^2)。
+
+        live ルートは ``send_mode='full'`` を拒否するので、実運用では到達しない。
+        回帰テストで窓・コミット判定の互換性を保証するために残している。
+        """
         self.last_audio_received_at = _timestamp()
         self.received_chunk_count += 1
         self.received_audio_bytes += len(audio_bytes or b"")
@@ -169,13 +393,13 @@ class LiveSession:
                 "timestamp": _timestamp(),
                 "saved_path": self.saved_path,
                 "model": self.config.model,
-                    "rms": 0.0,
-                    "skipped": True,
-                    "skip_reason": f"convert_waiting_next_chunk: {exc}",
-                    "duration_seconds": 0.0,
-                    "debug_path": None,
-                    "debug_wav_path": None,
-                }
+                "rms": 0.0,
+                "skipped": True,
+                "skip_reason": f"convert_waiting_next_chunk: {exc}",
+                "duration_seconds": 0.0,
+                "debug_path": None,
+                "debug_wav_path": None,
+            }
 
         with tempfile.TemporaryDirectory(prefix="bridgelog_live_tail_") as tmp:
             source_wav = Path(tmp) / "joined.wav"
@@ -242,14 +466,43 @@ class LiveSession:
             self.processed_audio_seconds = duration
             self.last_transcription_at = _timestamp()
 
+        window_end = self.received_audio_seconds
+        window_start = max(0.0, window_end - float(self.config.chunk_seconds))
+        stable_until = max(window_start, window_end - float(self.config.overlap_seconds))
+        return self._apply_window_result(
+            chunk_result,
+            window_start=window_start,
+            window_end=window_end,
+            stable_until=stable_until,
+            step_seconds=step_seconds,
+            duration=duration,
+            extra={
+                "debug_path": wav_result["debug_path"],
+                "debug_wav_path": wav_result["debug_wav_path"] or chunk_result["debug_wav_path"],
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # 窓の結果をコミット/暫定へ振り分ける（両経路の共通部）
+    # ------------------------------------------------------------------
+
+    def _apply_window_result(
+        self,
+        chunk_result: dict,
+        *,
+        window_start: float,
+        window_end: float,
+        stable_until: float,
+        step_seconds: float,
+        duration: float,
+        extra: Optional[dict] = None,
+    ) -> dict:
         text = _normalize_result_text(chunk_result["text"])
         model = chunk_result["model"]
         self.window_index += 1
-        window_end = self.received_audio_seconds
-        window_start = max(0.0, window_end - float(self.config.chunk_seconds))
         new_audio_start = max(0.0, window_end - max(step_seconds, 1.0))
-        stable_until = max(window_start, window_end - float(self.config.overlap_seconds))
         committed_until_before = self.committed_until_seconds
+        committed_text_before = self.committed_text
         absolute_segments = []
         for segment in chunk_result.get("segments", []):
             absolute_start = window_start + float(segment.get("start", 0.0) or 0.0)
@@ -287,12 +540,26 @@ class LiveSession:
             self.partial_text = text
             fallback_warning = "segment_classification_empty: 認識文字列をpartial_textへ退避しました"
         self.final_text = self.committed_text
-        return {
+
+        # 確定済みは再処理も再送もせず、差分だけをクライアントへ渡す。
+        # _join_transcript の rstrip で前方一致が崩れた場合だけ全文同期を要求する。
+        if self.committed_text.startswith(committed_text_before):
+            committed_delta = self.committed_text[len(committed_text_before):]
+            needs_snapshot = False
+        else:
+            committed_delta = ""
+            needs_snapshot = True
+
+        result = {
             "type": "result",
             "partial": self.partial_text,
             "final": committed_append,
             "committed_append": committed_append,
             "committed_text": self.committed_text,
+            "committed_delta": committed_delta,
+            "committed_length_before": len(committed_text_before),
+            "committed_length": len(self.committed_text),
+            "needs_snapshot": needs_snapshot,
             "partial_text": self.partial_text,
             "committed_until": self.committed_until_seconds,
             "committed_until_before": committed_until_before,
@@ -311,7 +578,6 @@ class LiveSession:
             "processed_audio_seconds": self.processed_audio_seconds,
             "window_start": window_start,
             "window_end": window_end,
-            "stable_until": stable_until,
             "overlap_seconds": float(self.config.overlap_seconds),
             "new_audio_start": new_audio_start,
             "new_audio_end": window_end,
@@ -320,9 +586,18 @@ class LiveSession:
             "result_id": f"{self.session_id}:{self.window_index}",
             "skipped": chunk_result["skipped"] or not bool(text),
             "skip_reason": chunk_result["skip_reason"],
-            "debug_path": wav_result["debug_path"],
-            "debug_wav_path": wav_result["debug_wav_path"] or chunk_result["debug_wav_path"],
+            "debug_path": None,
+            "debug_wav_path": chunk_result.get("debug_wav_path"),
+            "lag_seconds": round(self.lag_seconds, 2),
+            "dropped_seconds": round(self.dropped_seconds, 2),
         }
+        if extra:
+            result.update(extra)
+        return result
+
+    # ------------------------------------------------------------------
+    # ファイル出力 / レガシー ffmpeg ヘルパ
+    # ------------------------------------------------------------------
 
     def _prepare_output_path(self, output_folder: str) -> str:
         if output_folder:

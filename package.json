@@ -16,7 +16,7 @@
     "build": "npm run typecheck && npm run build:electron && npm run build:renderer",
     "dist": "npm run build && electron-builder",
     "typecheck": "tsc --noEmit",
-    "test:backend": "cd backend && python3 -m unittest discover -s tests -p 'test_*.py'",
+    "test:backend": "cd backend && \"$(node -e \"const fs=require('fs');const v='../.venv/bin/python';process.stdout.write(fs.existsSync(v)?v:'python3')\")\" -m unittest discover -s tests -p 'test_*.py'",
     "preview": "vite preview"
   },
   "dependencies": {

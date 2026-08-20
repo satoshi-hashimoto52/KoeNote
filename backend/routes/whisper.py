@@ -9,8 +9,12 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile, WebSocket,
 from pydantic import BaseModel
 from typing import Optional
 
+from services import session_store
+from services.live_registry import registry
 from services.live_session import LiveSession, LiveSessionConfig
+from services.pcm_stream import BYTES_PER_SAMPLE, SAMPLE_RATE
 from services.transcriber import ALLOWED_EXTENSIONS, TranscriptionStageError, run_transcribe, save_upload_file
+from services.wav_recorder import AsyncWavAppender, CrashSafeWavWriter
 
 router = APIRouter(prefix="/api/whisper")
 live_router = APIRouter()
@@ -422,10 +426,256 @@ def cancel(job_id: str):
     return {"status": "cancel_requested"}
 
 
+# ---------------------------------------------------------------------------
+# realtime (WebSocket)
+# ---------------------------------------------------------------------------
+# 受信・推論・heartbeat・送信を独立したタスクに分ける。
+# 受信ループが推論を await すると、uvicorn が 1 メッセージごとに transport.pause_reading()
+# するため PONG も読まれず、1 サイクルが ws_ping_timeout を超えた瞬間に切断される。
+# また受信キューが無制限に伸びて RSS が膨らむ。分離はその両方の構造的な対策。
+
+HEARTBEAT_INTERVAL_SECONDS = 2.0
+INFERENCE_IDLE_SLEEP_SECONDS = 0.2
+SEND_QUEUE_MAXSIZE = 128
+# 正常停止時、session_final が実際に送られるのを待つ上限。
+SENDER_DRAIN_TIMEOUT_SECONDS = 10.0
+# 混雑時に捨ててよいのは診断系だけ。本文・警告・確定は絶対に捨てない。
+DROPPABLE_MESSAGE_TYPES = {"log", "metrics", "heartbeat"}
+
+
+class _Outbox:
+    """送信を 1 タスクに集約する上限付きキュー。
+
+    heartbeat タスクと推論タスクが両方 ws.send_json を await すると
+    フレームが混ざりうるため、writer は 1 本に限定する。
+    上限があることが送信側のメモリ上限（受信側のリングバッファと対称）になる。
+    """
+
+    def __init__(self, maxsize: int = SEND_QUEUE_MAXSIZE):
+        self._queue = asyncio.Queue(maxsize=maxsize)
+        self.dropped = 0
+
+    def put_soon(self, message: dict) -> None:
+        """診断系の送信。混雑していたら捨てる（呼び出し側は絶対にブロックしない）。"""
+        assert message.get("type") in DROPPABLE_MESSAGE_TYPES, (
+            f"put_soon は診断系のみ: {message.get('type')} は await put() を使う"
+        )
+        try:
+            self._queue.put_nowait(message)
+        except asyncio.QueueFull:
+            self.dropped += 1
+
+    async def put(self, message) -> None:
+        """本文・警告・確定など、捨てられない種別。ここでは背圧をかける。"""
+        await self._queue.put(message)
+
+    async def get(self):
+        return await self._queue.get()
+
+
+async def _sender(websocket: WebSocket, outbox: _Outbox) -> None:
+    """ws.send_json を await する唯一のタスク。"""
+    while True:
+        message = await outbox.get()
+        if message is None:
+            return
+        await websocket.send_json(message)
+
+
+async def _heartbeat(session: LiveSession, outbox: _Outbox, stop_event: asyncio.Event) -> None:
+    """推論が worker スレッドで詰まっていても刻み続ける「生存」信号。
+
+    進捗ではなく生存を伝えるので、クライアントは無応答を確実に検知できる。
+    """
+    seq = 0
+    while not stop_event.is_set():
+        seq += 1
+        outbox.put_soon(
+            {
+                "type": "heartbeat",
+                "seq": seq,
+                "server_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "pid": os.getpid(),
+                **session.progress_snapshot(),
+            }
+        )
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS)
+        except asyncio.TimeoutError:
+            continue
+
+
+def _update_message(result: dict) -> dict:
+    """確定済み全文ではなく差分だけを載せる（1時間で約4MBの冗長JSONを削る）。"""
+    return {
+        "type": "update",
+        "committed_delta": result["committed_delta"],
+        "committed_length_before": result["committed_length_before"],
+        "committed_length": result["committed_length"],
+        "needs_snapshot": result["needs_snapshot"],
+        "partial_text": result["partial_text"],
+        "committed_until": result["committed_until"],
+        "stable_until": result["stable_until"],
+        "commit_segment_count": result["commit_segment_count"],
+        "partial_segment_count": result["partial_segment_count"],
+        "result_id": result["result_id"],
+        "session_id": result["session_id"],
+        "window_index": result["window_index"],
+        "window_start": result["window_start"],
+        "window_end": result["window_end"],
+        "overlap_seconds": result["overlap_seconds"],
+        "timestamp": result["timestamp"],
+    }
+
+
+def _metrics_message(result: dict, inference_ms: int) -> dict:
+    """診断用。数値のみ。セグメントのテキストは絶対に載せない。"""
+    return {
+        "type": "metrics",
+        "window_index": result["window_index"],
+        "window_start": round(result["window_start"], 2),
+        "window_end": round(result["window_end"], 2),
+        "stable_until": round(result["stable_until"], 2),
+        "committed_until": round(result["committed_until"], 2),
+        "committed_length": result["committed_length"],
+        "commit_segment_count": result["commit_segment_count"],
+        "partial_segment_count": result["partial_segment_count"],
+        "segment_count": len(result.get("segments", [])),
+        "rms": round(float(result.get("rms", 0.0) or 0.0), 4),
+        "inference_ms": inference_ms,
+        "lag_seconds": result.get("lag_seconds", 0.0),
+        "dropped_seconds": result.get("dropped_seconds", 0.0),
+        "skip_reason": result.get("skip_reason") or "",
+        "timestamp": result["timestamp"],
+    }
+
+
+async def _emit_window(session: LiveSession, outbox: _Outbox, result: dict, inference_ms: int) -> None:
+    if result.get("needs_snapshot"):
+        await outbox.put(
+            {
+                "type": "snapshot",
+                "committed_text": session.committed_text,
+                "committed_length": len(session.committed_text),
+                "partial_text": session.partial_text,
+                "session_id": session.session_id,
+                "timestamp": result["timestamp"],
+            }
+        )
+    else:
+        await outbox.put(_update_message(result))
+
+    if session.config.debug:
+        outbox.put_soon(_metrics_message(result, inference_ms))
+    if result.get("classification_warning"):
+        outbox.put_soon(
+            {"type": "log", "message": result["classification_warning"], "timestamp": result["timestamp"]}
+        )
+
+
+async def _inference_driver(
+    session: LiveSession,
+    outbox: _Outbox,
+    stop_event: asyncio.Event,
+    recorder,
+) -> None:
+    warned_degraded = False
+    warned_lagging = False
+    while not stop_event.is_set():
+        plan = session.plan_window()
+        if plan is None:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=INFERENCE_IDLE_SLEEP_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+            continue
+
+        started = time.monotonic()
+        try:
+            result = await asyncio.to_thread(session.run_window, *plan)
+        except Exception as exc:
+            print(f"[WS] ERROR stage=inference type={type(exc).__name__} msg={exc}", flush=True)
+            await outbox.put(
+                {
+                    "type": "error",
+                    "stage": "inference",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                    "worker_pid": os.getpid(),
+                    "worker_alive": True,
+                    "last_audio_received_at": session.last_audio_received_at,
+                    "last_transcription_at": session.last_transcription_at,
+                }
+            )
+            # 1窓の失敗でセッションを落とさない。次の窓へ進む。
+            session.advance_cursor(plan[1])
+            continue
+        inference_ms = int((time.monotonic() - started) * 1000)
+
+        if result is None:
+            # 破棄済み区間だった。plan_window が計上済みなので再計画に任せる。
+            continue
+
+        session.advance_cursor(plan[1])
+        await _emit_window(session, outbox, result, inference_ms)
+
+        if session.degraded and not warned_degraded:
+            warned_degraded = True
+            await outbox.put(
+                {
+                    "type": "warning",
+                    "code": "audio_dropped",
+                    "message": (
+                        f"処理が追いつかず音声を {session.dropped_seconds:.0f} 秒ぶん破棄しました。"
+                        "より小さいモデルを選んでください。"
+                    ),
+                    **session.progress_snapshot(),
+                }
+            )
+        elif session.lag_seconds > 30 and not warned_lagging:
+            warned_lagging = True
+            await outbox.put(
+                {
+                    "type": "warning",
+                    "code": "inference_lagging",
+                    "message": (
+                        f"文字起こしが約 {session.lag_seconds:.0f} 秒遅れています。"
+                        "録音は継続しています。"
+                    ),
+                    **session.progress_snapshot(),
+                }
+            )
+        elif session.lag_seconds < 10:
+            warned_lagging = False
+
+        if recorder is not None and recorder.dropped_frames and not recorder.drop_reported:
+            recorder.drop_reported = True
+            await outbox.put(
+                {
+                    "type": "warning",
+                    "code": "wav_write_failed",
+                    "message": "録音ファイルへの書き込みが追いついていません。",
+                }
+            )
+        print(
+            f"[whisper] session={session.session_id} window={result['window_index']} "
+            f"range={result['window_start']:.1f}-{result['window_end']:.1f}s "
+            f"commit={result['commit_segment_count']} partial={result['partial_segment_count']} "
+            f"committed_len={result['committed_length']} infer={inference_ms}ms "
+            f"lag={session.lag_seconds:.1f}s dropped={session.dropped_seconds:.1f}s",
+            flush=True,
+        )
+
+
 @live_router.websocket("/ws/live")
 async def live_transcribe(websocket: WebSocket):
     await websocket.accept()
-    session = None
+    session: Optional[LiveSession] = None
+    recorder = None
+    stop_event = asyncio.Event()
+    outbox = _Outbox()
+    stopped_normally = False
+
     try:
         first = await websocket.receive_text()
         payload = json.loads(first)
@@ -434,224 +684,204 @@ async def live_transcribe(websocket: WebSocket):
             await websocket.close(code=1003)
             return
 
-        session = LiveSession(LiveSessionConfig.from_payload(payload), session_id=uuid.uuid4().hex)
+        config = LiveSessionConfig.from_payload(payload)
+        if config.send_mode == "full":
+            # 送信済み音声を毎回全部送り直す経路は録音時間の2乗でコストが増える。
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "message": "send_mode='full' は O(T^2) のため realtime では使用しません。'pcm16' を使ってください。",
+                }
+            )
+            await websocket.close(code=1003)
+            return
+
+        resume_id = str(payload.get("resume_session_id", "") or "").strip()
+        resumed = False
+        if resume_id:
+            session = registry.acquire(resume_id)
+            resumed = session is not None
+        if session is None:
+            session = LiveSession(config, session_id=uuid.uuid4().hex)
+            registry.register(session)
+        else:
+            # 再接続では debug 表示の切り替えだけ引き継ぐ。
+            session.config.debug = config.debug
+
+        if session.config.write_to_file and session.config.output_folder:
+            try:
+                recorder = AsyncWavAppender(
+                    CrashSafeWavWriter(session_store.raw_audio_path(session.config.output_folder))
+                )
+            except OSError as exc:
+                print(f"[WS] WARN recording_disabled msg={exc}", flush=True)
+                await outbox.put(
+                    {
+                        "type": "warning",
+                        "code": "wav_write_failed",
+                        "message": f"録音ファイルを開けませんでした: {exc}",
+                    }
+                )
+
         print(
-            f"[WS] ready session={session.session_id} model={session.config.model} "
-            f"chunk={session.config.chunk_seconds}s overlap={session.config.overlap_seconds}s "
-            f"send_mode={session.config.send_mode} saved={session.saved_path}",
+            f"[WS] {'resumed' if resumed else 'ready'} session={session.session_id} "
+            f"model={session.config.model} chunk={session.config.chunk_seconds}s "
+            f"overlap={session.config.overlap_seconds}s mode={session.config.send_mode} "
+            f"sr={session.config.sample_rate} saved={session.saved_path}",
             flush=True,
         )
         await websocket.send_json(
             {
-                "type": "ready",
+                "type": "resumed" if resumed else "ready",
                 "session_id": session.session_id,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "saved_path": session.saved_path,
+                "audio_path": recorder.path if recorder is not None else None,
+                "server_total_samples": session.pcm.total_samples,
+                "committed_length": len(session.committed_text),
+                "sample_rate": SAMPLE_RATE,
+                "chunk_seconds": session.config.chunk_seconds,
+                "overlap_seconds": session.config.overlap_seconds,
+                "heartbeat_interval_seconds": HEARTBEAT_INTERVAL_SECONDS,
             }
         )
+        if resumed:
+            # 差分の基準がずれないよう、再接続直後は全文を渡す。
+            await websocket.send_json(
+                {
+                    "type": "snapshot",
+                    "committed_text": session.committed_text,
+                    "committed_length": len(session.committed_text),
+                    "partial_text": session.partial_text,
+                    "session_id": session.session_id,
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }
+            )
 
-        while True:
-            message = await websocket.receive()
-            if message.get("type") == "websocket.disconnect":
-                break
-            text = message.get("text")
-            if text is not None:
-                try:
-                    command = json.loads(text)
-                except json.JSONDecodeError:
+        # TaskGroup は本体の例外を ExceptionGroup に包むため WebSocketDisconnect の
+        # 判別ができなくなる。タスクは明示的に管理し、通常の例外意味論を保つ。
+        sender_task = asyncio.create_task(_sender(websocket, outbox))
+        heartbeat_task = asyncio.create_task(_heartbeat(session, outbox, stop_event))
+        driver = asyncio.create_task(_inference_driver(session, outbox, stop_event, recorder))
+        background = [sender_task, heartbeat_task, driver]
+
+        try:
+            while True:
+                message = await websocket.receive()
+                if message.get("type") == "websocket.disconnect":
+                    break
+
+                text = message.get("text")
+                if text is not None:
+                    try:
+                        command = json.loads(text)
+                    except json.JSONDecodeError:
+                        continue
+                    kind = command.get("type")
+
+                    if kind == "stop":
+                        session.stopping = True
+                        stop_event.set()
+                        await driver
+                        # カーソルより先の端切れ（従来は無言で捨てられていた）を回収する。
+                        try:
+                            tail = await asyncio.to_thread(session.flush_tail)
+                        except Exception as exc:
+                            print(f"[WS] WARN flush_tail failed: {exc}", flush=True)
+                            tail = None
+                        if tail is not None:
+                            await outbox.put(_update_message(tail))
+                        final_result = session.finalize()
+                        print(
+                            f"[WS] session_final session={session.session_id} "
+                            f"committed_len={len(final_result['committed_text'])} "
+                            f"recorded={final_result['recorded_seconds']:.1f}s "
+                            f"dropped={final_result['dropped_seconds']:.1f}s saved={session.saved_path}",
+                            flush=True,
+                        )
+                        await outbox.put(
+                            {
+                                "type": "session_final",
+                                "text": final_result["text"],
+                                "committed_text": final_result["committed_text"],
+                                "partial_text": final_result["partial_text"],
+                                "result_id": final_result["result_id"],
+                                "session_id": final_result["session_id"],
+                                "window_index": final_result["window_index"],
+                                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                "saved_path": session.saved_path,
+                                "audio_path": recorder.path if recorder is not None else None,
+                                "recorded_seconds": final_result["recorded_seconds"],
+                                "dropped_seconds": final_result["dropped_seconds"],
+                            }
+                        )
+                        stopped_normally = True
+                        break
+
+                    if kind == "resync":
+                        await outbox.put(
+                            {
+                                "type": "snapshot",
+                                "committed_text": session.committed_text,
+                                "committed_length": len(session.committed_text),
+                                "partial_text": session.partial_text,
+                                "session_id": session.session_id,
+                                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                            }
+                        )
+                        continue
+
+                    if kind == "set_debug":
+                        session.config.debug = bool(command.get("value"))
+                        continue
+
+                    if kind == "gap":
+                        # クライアントが保持しきれなかった区間を無音で埋め、絶対時刻を壁時計に合わせる。
+                        samples = int(command.get("samples") or 0)
+                        if samples > 0:
+                            session.append_gap(samples)
+                            if recorder is not None:
+                                recorder.append(b"\x00" * (samples * BYTES_PER_SAMPLE))
+                        continue
+
                     continue
-                if command.get("type") == "stop":
-                    final_result = session.finalize()
+
+                audio_bytes = message.get("bytes")
+                if not audio_bytes:
+                    continue
+                # 受信側は追記だけ。ここをブロックさせないことが全体の前提。
+                session.append_pcm(audio_bytes)
+                if recorder is not None:
+                    recorder.append(audio_bytes)
+
+        finally:
+            stop_event.set()
+            if stopped_normally:
+                # session_final を積んだ直後に sender を cancel すると最終確定が届かない。
+                # 番兵を入れて sender が自然終了するのを待ってから畳む。
+                await outbox.put(None)
+                try:
+                    await asyncio.wait_for(sender_task, timeout=SENDER_DRAIN_TIMEOUT_SECONDS)
+                except (asyncio.TimeoutError, Exception) as exc:
+                    print(f"[WS] WARN sender drain failed: {type(exc).__name__} {exc}", flush=True)
+            for task in background:
+                task.cancel()
+            results = await asyncio.gather(*background, return_exceptions=True)
+            for task_result in results:
+                if isinstance(task_result, Exception) and not isinstance(task_result, asyncio.CancelledError):
                     print(
-                        f"[WS] session_final session={session.session_id} "
-                        f"committed_len={len(final_result['committed_text'])} saved={session.saved_path}",
+                        f"[WS] ERROR background type={type(task_result).__name__} msg={task_result}",
                         flush=True,
                     )
-                    await websocket.send_json(
-                        {
-                            "type": "session_final",
-                            "text": final_result["text"],
-                            "committed_text": final_result["committed_text"],
-                            "partial_text": final_result["partial_text"],
-                            "result_id": final_result["result_id"],
-                            "session_id": final_result["session_id"],
-                            "window_index": final_result["window_index"],
-                            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                            "saved_path": session.saved_path,
-                        }
-                    )
-                    break
-                continue
 
-            audio_bytes = message.get("bytes")
-            if not audio_bytes:
-                continue
-            try:
-                byte_size = len(audio_bytes)
-                print(
-                    f"[WS] recv session={session.session_id} chunk={session.received_chunk_count + 1} "
-                    f"bytes={byte_size} mime={session.config.mime_type}",
-                    flush=True,
-                )
-                await websocket.send_json(
-                    {
-                        "type": "log",
-                        "message": (
-                            f"chunk受信開始 bytes={byte_size} mime={session.config.mime_type} "
-                            f"mode={session.config.send_mode}"
-                        ),
-                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    }
-                )
-                await websocket.send_json(
-                    {
-                        "type": "log",
-                        "message": "モデル読み込み",
-                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    }
-                )
-                await websocket.send_json(
-                    {
-                        "type": "log",
-                        "message": "推論開始",
-                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    }
-                )
-                result = await asyncio.to_thread(session.transcribe_chunk, audio_bytes)
-            except Exception as exc:
-                print(f"[WS] ERROR stage=websocket_receive type={type(exc).__name__} msg={exc}", flush=True)
-                await websocket.send_json(
-                    {
-                        "type": "error",
-                        "stage": "websocket_receive",
-                        "error_type": type(exc).__name__,
-                        "message": str(exc),
-                        "worker_pid": os.getpid(),
-                        "worker_alive": True,
-                        "last_audio_received_at": session.last_audio_received_at,
-                        "last_transcription_at": session.last_transcription_at,
-                    }
-                )
-                continue
-
-            rms = float(result.get("rms", 0.0) or 0.0)
-            duration = float(result.get("duration_seconds", 0.0) or 0.0)
-            print(
-                f"[decode] session={session.session_id} input_bytes={len(audio_bytes)} "
-                f"duration={duration:.1f}s rms={rms:.4f} skipped={result.get('skipped')} "
-                f"skip_reason={result.get('skip_reason') or '-'}",
-                flush=True,
-            )
-            if not result.get("skipped") or result.get("committed_text") or result.get("partial_text"):
-                print(
-                    f"[whisper] session={session.session_id} window={result.get('window_index')} "
-                    f"range={result.get('window_start', 0):.1f}-{result.get('window_end', 0):.1f}s "
-                    f"segs={len(result.get('segments', []))} "
-                    f"commit_segs={result.get('commit_segment_count', 0)} partial_segs={result.get('partial_segment_count', 0)} "
-                    f"committed_len={len(result.get('committed_text', ''))} "
-                    f"partial_len={len(result.get('partial_text', ''))}",
-                    flush=True,
-                )
-            segment_summary = ";".join(
-                f"{segment.get('start', 0):.1f}-{segment.get('end', 0):.1f}:{str(segment.get('text', ''))[:20]}"
-                for segment in result.get("segments", [])
-            )
-            await websocket.send_json(
-                {
-                    "type": "log",
-                    "message": (
-                        f"window={result.get('window_index', '-')} "
-                        f"range={result.get('window_start', 0):.1f}-{result.get('window_end', 0):.1f}s "
-                        f"stable_until={result.get('stable_until', 0):.1f} "
-                        f"committed_before={result.get('committed_until_before', 0):.1f} "
-                        f"committed_after={result.get('committed_until', 0):.1f} "
-                        f"received_audio={result.get('received_audio_seconds', 0):.1f} "
-                        f"processed_audio={result.get('processed_audio_seconds', 0):.1f} "
-                        f"committed_text_length={len(result.get('committed_text', ''))} "
-                        f"commit_segments={result.get('commit_segment_count', 0)} "
-                        f"partial_segments={result.get('partial_segment_count', 0)} "
-                        f"result_text_length={len(result.get('text', ''))} "
-                        f"segments_count={len(result.get('segments', []))} "
-                        f"committed_append_length={len(result.get('committed_append', ''))} "
-                        f"partial_text_length={len(result.get('partial_text', ''))} "
-                        f"segments={segment_summary}"
-                    ),
-                    "timestamp": result["timestamp"],
-                }
-            )
-            if result.get("classification_warning"):
-                await websocket.send_json(
-                    {
-                        "type": "log",
-                        "message": result["classification_warning"],
-                        "timestamp": result["timestamp"],
-                    }
-                )
-            await websocket.send_json(
-                {
-                    "type": "log",
-                    "message": (
-                        f"音声デコード完了 duration={duration:.1f}s "
-                        f"count={session.received_chunk_count} total_bytes={session.received_audio_bytes} "
-                        f"last_audio={session.last_audio_received_at} last_transcription={session.last_transcription_at}"
-                    ),
-                    "timestamp": result["timestamp"],
-                }
-            )
-            if result.get("debug_path") or result.get("debug_wav_path"):
-                await websocket.send_json(
-                    {
-                        "type": "log",
-                        "message": f"debug chunk: {result.get('debug_path') or '-'} wav={result.get('debug_wav_path') or '-'}",
-                        "timestamp": result["timestamp"],
-                    }
-                )
-            if result.get("skipped"):
-                reason = result.get("skip_reason") or "no_text"
-                await websocket.send_json(
-                    {
-                        "type": "log",
-                        "message": f"skip理由={reason} rms={rms:.4f}",
-                        "timestamp": result["timestamp"],
-                    }
-                )
-                continue
-            await websocket.send_json(
-                {
-                    "type": "log",
-                    "message": f"RMS={rms:.4f}",
-                    "timestamp": result["timestamp"],
-                }
-            )
-            if result.get("committed_text") or result.get("partial_text"):
-                print(
-                    f"[WS] update session={session.session_id} "
-                    f"committed_len={len(result['committed_text'])} partial_len={len(result['partial_text'])} "
-                    f"result_id={result['result_id']}",
-                    flush=True,
-                )
-                await websocket.send_json(
-                    {
-                        "type": "update",
-                        "committed_text": result["committed_text"],
-                        "partial_text": result["partial_text"],
-                        "committed_until": result["committed_until"],
-                        "stable_until": result["stable_until"],
-                        "commit_segment_count": result["commit_segment_count"],
-                        "partial_segment_count": result["partial_segment_count"],
-                        "result_id": result["result_id"],
-                        "session_id": result["session_id"],
-                        "window_index": result["window_index"],
-                        "window_start": result["window_start"],
-                        "window_end": result["window_end"],
-                        "overlap_seconds": result["overlap_seconds"],
-                        "new_audio_start": result["new_audio_start"],
-                        "new_audio_end": result["new_audio_end"],
-                        "timestamp": result["timestamp"],
-                    }
-                )
     except WebSocketDisconnect:
-        print("[WS] disconnect", flush=True)
+        print(
+            f"[WS] disconnect session={session.session_id if session else '-'} "
+            f"state={websocket.client_state.name} "
+            f"received_bytes={session.received_audio_bytes if session else 0} "
+            f"recorded={session.recorded_seconds if session else 0:.1f}s",
+            flush=True,
+        )
     except Exception as exc:
         print(f"[WS] ERROR fatal type={type(exc).__name__} msg={exc}", flush=True)
         try:
@@ -659,5 +889,22 @@ async def live_transcribe(websocket: WebSocket):
         except Exception:
             pass
     finally:
+        stop_event.set()
+        # 正常停止は明示的に clean close する。1006(異常終了)のままだと
+        # クライアント側の「正常停止/異常切断」の判別材料が濁る。
+        if stopped_normally:
+            try:
+                await websocket.close(code=1000)
+            except Exception:
+                pass
+        if recorder is not None:
+            recorder.close()
         if session is not None:
-            session.close()
+            if stopped_normally:
+                registry.discard(session.session_id)
+                session.close()
+            else:
+                # 異常切断は再接続を待つ。TXT は追記済みなので確定分は失われない。
+                registry.detach(session.session_id)
+        for reaped in registry.reap():
+            reaped.close()

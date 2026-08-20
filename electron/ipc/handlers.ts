@@ -1,8 +1,8 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron';
 import { existsSync, readFileSync } from 'node:fs';
-import { writeFile, mkdir } from 'node:fs/promises';
+import { writeFile, mkdir, appendFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { getBackendLog } from '../backend';
+import { getBackendLog, restartBackend } from '../backend';
 
 // マイGPT URL として開いてよいホスト（任意ドメインは開かない）。
 const ALLOWED_GPT_HOSTS = ['chatgpt.com', 'chat.openai.com'];
@@ -115,6 +115,22 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   });
 
   ipcMain.handle('backend:log', () => getBackendLog());
+
+  ipcMain.handle('backend:restart', async () => {
+    const ok = await restartBackend();
+    return { ok };
+  });
+
+  ipcMain.handle('transcript:appendNotice', async (_evt, path: string, text: string) => {
+    const target = String(path ?? '');
+    if (!target || !existsSync(target)) return { ok: false, reason: 'not_found' };
+    try {
+      await appendFile(target, `${String(text ?? '')}\n`, 'utf-8');
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : 'append_failed' };
+    }
+  });
 }
 
 export { isAllowedGptUrl };

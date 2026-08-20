@@ -1,17 +1,23 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { TranscriptView } from './components/TranscriptView';
+import { useLiveTranscription } from './features/transcription/useLiveTranscription';
+import { primeAlertTone } from './features/transcription/alertTone';
 import {
+  ERROR_REASON_LABELS,
   LIVE_PRESETS,
-  useLiveTranscription,
+  statusLabel,
+  statusTone as toneForStatus,
   type LiveDelayMode,
   type LiveModel
-} from './features/transcription/useLiveTranscription';
+} from './features/transcription/liveTypes';
 import {
   backendOrigin,
   checkOutput,
   createSession,
   finalizeSession,
-  getBridge
+  getBridge,
+  postDiagnostics,
+  repairAudio
 } from './services/api';
 
 interface Attachment {
@@ -30,6 +36,16 @@ function isValidGptUrl(url: string): boolean {
   const value = url.trim();
   if (!value) return false;
   return GPT_URL_PREFIXES.some((prefix) => value.startsWith(prefix));
+}
+
+function clockTime(): string {
+  return new Date().toLocaleTimeString('ja-JP', { hour12: false });
+}
+
+function formatIsoTime(value: string | null): string {
+  if (!value) return '-';
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleTimeString('ja-JP', { hour12: false });
 }
 
 function formatElapsed(sec: number): string {
@@ -171,6 +187,8 @@ export default function App() {
 
   const startRecording = useCallback(async () => {
     setBanner(null);
+    // 異常時に確実に警告音を鳴らせるよう、ユーザー操作の中で AudioContext を起こす。
+    primeAlertTone();
     if (!title.trim()) {
       setBanner({ tone: 'error', text: 'タイトルを入力してください' });
       return;
@@ -185,8 +203,9 @@ export default function App() {
         setBanner({ tone: 'error', text: '保存先が存在せず、作成もできません' });
         return;
       }
-      if (check.free_bytes !== null && check.free_bytes < 200 * 1024 * 1024) {
-        setBanner({ tone: 'error', text: '保存先の空き容量が不足しています' });
+      // 録音音声(16kHz mono PCM)は約115MB/時。2時間ぶん + 余裕を要求する。
+      if (check.free_bytes !== null && check.free_bytes < 600 * 1024 * 1024) {
+        setBanner({ tone: 'error', text: '保存先の空き容量が不足しています（録音2時間で約230MB必要）' });
         return;
       }
       const session = await createSession({
@@ -231,17 +250,59 @@ export default function App() {
   const stopRecording = useCallback(async () => {
     // recording -> finalizing。session_final と TXT保存が確定するまでクリアを禁止する。
     setFinalizing(true);
-    live.stop();
+    await live.stop();
     if (sessionDir) {
       try {
         await finalizeSession(sessionDir, 'done');
       } catch {
         /* finalize 失敗でも文字起こしは保存済み */
       }
+      // 強制終了していた場合に備えて録音ファイルのヘッダを整える。
+      try {
+        await repairAudio(sessionDir);
+      } catch {
+        /* 修復失敗でも PCM 本体はディスク上に残っている */
+      }
     }
     setTranscriptReady(true);
     setFinalizing(false);
   }, [live, sessionDir]);
+
+  /** 異常停止を、ユーザーが後から辿れる場所すべてに残す。 */
+  const recordInterruption = useCallback(
+    async (reason: string, detail: string) => {
+      const line = `[中断] ${clockTime()} 文字起こしが異常終了しました (reason=${reason}) ${detail}`;
+      // TXT はユーザーが GPT へ渡す成果物。無言で途切れると中断が見えない。
+      if (bridge && transcriptPath) {
+        await bridge.appendTranscriptNotice(transcriptPath, line).catch(() => undefined);
+      }
+      if (sessionDir) {
+        await postDiagnostics(sessionDir, line).catch(() => undefined);
+      }
+    },
+    [bridge, transcriptPath, sessionDir]
+  );
+
+  /** 異常ポップアップの「録音を終了して保存」。 */
+  const stopFromAnomaly = useCallback(async () => {
+    live.dismissAnomaly();
+    await stopRecording();
+  }, [live, stopRecording]);
+
+  const restartBackendAndReconnect = useCallback(async () => {
+    if (!bridge) {
+      live.reconnect();
+      return;
+    }
+    setBanner({ tone: 'warn', text: 'Backend を再起動しています…' });
+    const result = await bridge.restartBackend().catch(() => ({ ok: false }));
+    if (!result.ok) {
+      setBanner({ tone: 'error', text: 'Backend の再起動に失敗しました。アプリを再起動してください。' });
+      return;
+    }
+    setBanner({ tone: 'ok', text: 'Backend を再起動しました。再接続します。' });
+    live.reconnect();
+  }, [bridge, live]);
 
   // --- マイGPTを開く（URL をブラウザで開くだけ。データ送信はしない） ---
   const gptUrlValid = isValidGptUrl(gptUrl);
@@ -256,6 +317,10 @@ export default function App() {
   const openTranscript = useCallback(async () => {
     if (bridge && transcriptPath) await bridge.revealInFinder(transcriptPath);
   }, [bridge, transcriptPath]);
+
+  const openAudio = useCallback(async () => {
+    if (bridge && live.audioPath) await bridge.revealInFinder(live.audioPath);
+  }, [bridge, live.audioPath]);
 
   const openGpt = useCallback(async () => {
     setBanner(null);
@@ -298,14 +363,37 @@ export default function App() {
     }
   }, [canClear, live.committed, live.partial, doClear]);
 
-  const statusTone = useMemo(() => {
-    if (live.status.includes('エラー')) return 'error';
-    if (recording || finalizing) return 'recording';
-    if (transcriptReady) return 'done';
-    return 'idle';
-  }, [live.status, recording, finalizing, transcriptReady]);
+  // --- Backend 異常終了の検知（main プロセスからの通知）---
+  useEffect(() => {
+    if (!bridge?.onBackendExited) return;
+    const offExit = bridge.onBackendExited((info) => {
+      live.noteBackendExit(`code=${info.code} signal=${info.signal} reason=${info.reason}`);
+    });
+    const offRestart = bridge.onBackendRestartRequested?.(() => {
+      void restartBackendAndReconnect();
+    });
+    return () => {
+      offExit();
+      offRestart?.();
+    };
+  }, [bridge, live, restartBackendAndReconnect]);
 
-  const phaseLabel = recording ? '録音中' : finalizing ? '確定処理中…' : live.status;
+  // 異常を検知したら、TXT と diagnostics.log に必ず痕跡を残す。
+  const loggedAnomalyRef = useRef(0);
+  useEffect(() => {
+    const current = live.anomaly;
+    if (!current || loggedAnomalyRef.current === current.at) return;
+    loggedAnomalyRef.current = current.at;
+    void recordInterruption(current.reason, current.detail);
+  }, [live.anomaly, recordInterruption]);
+
+  const statusTone = useMemo(() => {
+    if (finalizing) return 'recording';
+    if (live.status.kind === 'idle' && transcriptReady) return 'done';
+    return toneForStatus(live.status);
+  }, [live.status, finalizing, transcriptReady]);
+
+  const phaseLabel = finalizing ? '確定処理中…' : statusLabel(live.status);
 
   return (
     <div className="app">
@@ -320,10 +408,22 @@ export default function App() {
 
       <main className="content">
         {banner ? <div className={`banner banner-${banner.tone}`}>{banner.text}</div> : null}
+        {live.warning ? (
+          <div className="banner banner-warn">
+            {live.warning.message}
+            <button type="button" className="btn-mini banner-btn" onClick={live.dismissWarning}>閉じる</button>
+          </div>
+        ) : null}
+        {live.droppedClientSeconds > 0 ? (
+          <div className="banner banner-warn">
+            接続が不安定だったため、文字起こしへ送れなかった音声が
+            {live.droppedClientSeconds.toFixed(1)} 秒あります（録音ファイルには残っています）。
+          </div>
+        ) : null}
         {health && health.ffmpeg_ok === false ? (
           <div className="banner banner-error">
-            Backend が ffmpeg/ffprobe を見つけられません。realtime のデコードができず文字起こしは空のままになります。
-            Homebrew の ffmpeg をインストール（`brew install ffmpeg`）し、アプリを再起動してください。
+            Backend が ffmpeg/ffprobe を見つけられません。リアルタイム文字起こしは ffmpeg を使わないため影響しませんが、
+            音声ファイルからの文字起こしはできません。Homebrew の ffmpeg をインストール（`brew install ffmpeg`）してください。
           </div>
         ) : null}
 
@@ -447,6 +547,8 @@ export default function App() {
             </span>
           </span>
           <span>状態: {phaseLabel}</span>
+          <span title="Backend が最後に音声を受信した時刻">音声: {formatIsoTime(live.progress.lastAudioReceivedAt)}</span>
+          <span title="最後に文字起こしが完了した時刻">文字起こし: {formatIsoTime(live.progress.lastTranscriptionAt)}</span>
           {live.savedPath ? <span className="saved-path" title={live.savedPath}>保存: {baseName(live.savedPath)}</span> : null}
         </section>
 
@@ -481,11 +583,20 @@ export default function App() {
           </div>
         </section>
 
-        <details className="diag">
+        <details className="diag" onToggle={(e) => live.setDebug((e.currentTarget as HTMLDetailsElement).open)}>
           <summary>診断ログ（Realtime パイプライン）</summary>
           <div className="diag-tools">
             <span>入力レベル(RMS): {live.inputLevel.toFixed(4)}{live.inputLevel < 0.001 && recording ? ' ⚠ ほぼ無音 — BlackHole のルーティングを確認' : ''}</span>
+            <span>キャプチャ経路: {live.capturePath ?? '-'}</span>
+            <span>録音: {live.progress.recordedSeconds.toFixed(0)}s</span>
+            <span>処理済み: {live.progress.processedAudioSeconds.toFixed(0)}s</span>
+            <span title="文字起こしが録音より何秒遅れているか">遅延: {live.progress.lagSeconds.toFixed(1)}s</span>
+            <span>破棄: {live.progress.droppedSeconds.toFixed(1)}s</span>
+            <span>窓: {live.progress.windowIndex}</span>
             <span>ffmpeg: {health ? (health.ffmpeg_ok ? `OK (${baseName(health.ffmpeg || '')})` : 'なし') : '不明'}</span>
+            {live.audioPath ? (
+              <button type="button" className="btn-mini" onClick={openAudio} disabled={!bridge}>録音ファイルを開く</button>
+            ) : null}
             {bridge ? <button type="button" className="btn-mini" onClick={loadBackendLog}>Backendログ取得</button> : null}
           </div>
           <pre className="diag-log">{live.logText || 'ログなし'}</pre>
@@ -497,6 +608,35 @@ export default function App() {
           ) : null}
         </details>
       </main>
+
+      {live.anomaly ? (
+        <div className="modal-backdrop">
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>⚠ 文字起こしが停止しました</h3>
+            <p className="modal-note">
+              {ERROR_REASON_LABELS[live.anomaly.reason]}
+              {'\n'}{live.anomaly.detail}
+              {'\n\n'}確定済みの文字起こしは保存済みです。録音音声も別ファイルに残っています。
+              {live.savedPath ? `\n文字起こし: ${live.savedPath}` : ''}
+              {live.audioPath ? `\n録音音声: ${live.audioPath}` : ''}
+            </p>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="btn-accent"
+                onClick={live.anomaly.reason === 'backend_exit' ? restartBackendAndReconnect : live.reconnect}
+                disabled={!live.anomaly.recoverable}
+                title={live.anomaly.recoverable ? '同じセッションに再接続して続きから記録します' : '再接続できない状態です'}
+              >
+                再接続
+              </button>
+              <button type="button" className="btn-danger" onClick={stopFromAnomaly}>
+                録音を終了して保存
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {clearConfirmOpen ? (
         <div className="modal-backdrop" onClick={() => setClearConfirmOpen(false)}>

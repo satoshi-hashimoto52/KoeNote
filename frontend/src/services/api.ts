@@ -75,6 +75,18 @@ export function updateAttachments(sessionDir: string, attachments: string[]): Pr
   return postJson('/api/session/attachments', { session_dir: sessionDir, attachments });
 }
 
+/** 異常停止の記録を diagnostics.log に残す。事後解析のための唯一の永続ログ。 */
+export function postDiagnostics(sessionDir: string, message: string): Promise<{ ok: boolean }> {
+  return postJson('/api/session/diagnostics', { session_dir: sessionDir, message });
+}
+
+/** 強制終了でヘッダが古くなった recording.wav を実ファイル長から復旧する。 */
+export function repairAudio(
+  sessionDir: string
+): Promise<{ ok: boolean; reason?: string; audio_path: string; seconds: number }> {
+  return postJson('/api/session/repair_audio', { session_dir: sessionDir });
+}
+
 /** マイGPTへ渡す依頼文を生成する。設定で編集した本文があれば優先する。 */
 export function buildRequestText(title: string, attachmentNames: string[], template?: string): string {
   const names = attachmentNames.length

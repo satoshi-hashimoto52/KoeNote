@@ -40,14 +40,15 @@ BridgeLog/
 ## 技術スタック
 
 - Electron / React 18 / TypeScript / Vite
-- FastAPI / WebSocket / faster-whisper / openai-whisper / ffmpeg
+- FastAPI / WebSocket / faster-whisper / openai-whisper / numpy / ffmpeg
 
 ## 前提
 
 - macOS（Apple Silicon 検証）
 - Node.js 18+ / npm
 - Python 3.x
-- **ffmpeg / ffprobe**（`brew install ffmpeg`）— システム PATH の ffmpeg を使用します
+- **ffmpeg / ffprobe**（`brew install ffmpeg`）— 音声ファイルからの文字起こしに使用します
+  （リアルタイム文字起こしは ffmpeg を使いません）
   （環境変数 `BRIDGELOG_FFMPEG_DIR` で同梱ディレクトリを指定することも可能）
 
 ## セットアップ
@@ -113,21 +114,88 @@ npm run dev
 | `npm run typecheck` | TypeScript 型チェック |
 | `npm run test:backend` | Backend の Python ユニットテスト |
 
+## リアルタイム文字起こしの構造
+
+長時間（1〜2時間）の連続録音に耐えるため、音声は **16kHz PCM16 の差分送信**で扱う。
+
+```
+Renderer                                  Backend (1 event loop, 4 tasks)
+AudioContext(16kHz)                       _receiver     : PCM を追記するだけ（ブロックしない）
+ └ AudioWorklet ─ 4KB/128ms ─ WS ──────>  _inference    : 直近1窓だけを別スレッドで推論
+   (blob: URL から読込)                   _heartbeat    : 2秒ごとに生存信号
+   ScriptProcessorNode へ自動fallback     _sender       : 送信を1本に集約（上限付きキュー）
+```
+
+設計上の要点:
+
+- **送信量は 32KB/秒 固定**で、経過時間に依存しない（1時間で約115MB）。
+- Whisper が見るのは常に**直近 1 窓だけ**。1 周期のコストは録音長に依存しない。
+  これは `test_live_session_pcm.py` の「毎回の呼び出しが厳密に `chunk_samples` を受け取る」
+  アサーションで機械的に保証している。
+- 音声は容量 180 秒の**リングバッファ**に保持（約5.8MB）。推論が遅れても順に消化して
+  取りこぼさず、容量を超えたときだけ明示的に破棄して `dropped_seconds` に計上・通知する。
+- 確定済みテキストは再処理・再送しない。`update` は**差分のみ**を運び、
+  基準がずれたら `resync` → `snapshot` で自己修復する。
+- 受信ループは推論を待たない。これにより uvicorn の `pause_reading` 起因の
+  keepalive 切断（close 1011）と受信キューの膨張が構造的に起きない。
+- リアルタイム経路は **ffmpeg を使わない**（faster-whisper に numpy 配列を直接渡す）。
+  ffmpeg は音声ファイルからの文字起こしにのみ必要。
+
+### 異常検知と保全
+
+- **録音音声は文字起こしとは別系統**で `<session>/audio/recording.wav` へ逐次保存。
+  10 秒ごとにヘッダのサイズ欄を書き戻すので、強制終了しても再生できる
+  （`POST /api/session/repair_audio` で実ファイル長から復旧も可能）。
+- 確定テキストは `transcript.txt` へ即時 flush 追記。
+- ウォッチドッグ 4 層: サーバ heartbeat 断（8秒）／キャプチャ停止（3秒）／
+  文字起こし停止（60秒）／Backend プロセス異常終了（main プロセスが検知）。
+- 異常時は **OS通知＋画面内ポップアップ＋警告音**の 3 経路で知らせ、
+  ポップアップから「再接続」「録音を終了して保存」を選べる。
+  異常の痕跡は `transcript.txt` の `[中断]` 行と `diagnostics.log` に残る。
+- 異常切断は自動再接続（最大5回・指数バックオフ）。再接続中の音声は
+  上限 60 秒のバッファに保持し、溢れた分は破棄したことを画面に出す。
+- 録音中は `powerSaveBlocker` と `backgroundThrottling:false` でスリープ／
+  タイマー間引きを抑止する（ただし蓋を閉じるとスリープする）。
+
 ## テスト
 
 ```bash
-# Backend
+# Backend ユニットテスト（53件。2時間相当の連続動作テストを含み、約8秒で完走）
 npm run test:backend
-# または
-cd backend && python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-移植した Whisper のユニットテスト（16件）:
+- `test_live_session.py` — レガシー webm 経路の committed/partial 契約（回帰ガード）
+- `test_live_session_pcm.py` — 窓のケイデンス・差分の正しさ・追いつき・
+  **2時間連続でメモリと1周期コストが増えないこと**
+- `test_pcm_stream.py` — リングバッファの絶対番号・破棄時 `None`・有界性・リサンプラ
+- `test_wav_recorder.py` — 強制終了しても再生可能な WAV・ヘッダ復旧
+- `test_live_ws_protocol.py` — 推論中も heartbeat が届く／差分のみ送る／resync／再接続の継続
+- `test_whisper_transcriber.py` / `test_whisper_runner.py` / `test_whisper_routes.py` — ファイル文字起こし側
 
-- `test_live_session.py` — committed/partial 契約・segment 退避
-- `test_whisper_transcriber.py` — Worker 監視・キャンセル・ffmpeg 回収・非ゼロ終了
-- `test_whisper_runner.py` — 原子的保存・整形・出力ファイル
-- `test_whisper_routes.py` — ジョブ状態機械（FastAPI 必須）
+### 長時間の実測
+
+```bash
+# Backend を起動しておく（npm run dev でもよい）
+.venv/bin/python scripts/live_soak.py --minutes 120 --speed 90 \
+  --output-folder /tmp/bridgelog_soak
+```
+
+実 WebSocket で合成 PCM を流し、Backend の RSS 傾き・heartbeat 断・破棄音声・
+録音ファイル長を判定する。`--speed 1` にすると実時間で回せる。
+
+補助スクリプト:
+
+- `scripts/audio_worklet_check.cjs` — 実 `file://` + 実 CSP で AudioWorklet が
+  読み込めるかを確認する（キャプチャ方式を変えるときは必ず先に実行）
+- `scripts/pcm_pipeline_check.cjs` — Renderer → Backend の PCM 経路を通しで検証
+
+### 既知の不具合（未修正）
+
+窓の `stable_until` をまたぐ長い segment が、次の窓に含まれない場合に
+テキストが失われることがある。レガシー webm 経路でも同一の結果になるため
+PCM 化による回帰ではない（`test_live_session_pcm.py` の
+`KnownSegmentBoundaryDefectTest` に再現を記録）。修正はコミット判定
+アルゴリズムの再設計を伴う。
 
 ## 配布
 

@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from services import session_store
+from services.wav_recorder import repair_wav_header
 
 router = APIRouter(prefix="/api/session")
 
@@ -35,6 +36,15 @@ class CheckOutputRequest(BaseModel):
 class UpdateAttachmentsRequest(BaseModel):
     session_dir: str
     attachments: List[str] = []
+
+
+class DiagnosticsRequest(BaseModel):
+    session_dir: str
+    message: str
+
+
+class RepairAudioRequest(BaseModel):
+    session_dir: str
 
 
 @router.post("/check_output")
@@ -86,3 +96,32 @@ def update_attachments(payload: UpdateAttachmentsRequest):
         return {"ok": True}
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"attachments.json の更新に失敗しました: {exc}")
+
+
+@router.post("/diagnostics")
+def diagnostics(payload: DiagnosticsRequest):
+    """異常停止の記録を diagnostics.log に残す（事後解析のための唯一の永続ログ）。"""
+    meeting_dir = Path(payload.session_dir)
+    if not meeting_dir.is_dir():
+        raise HTTPException(status_code=404, detail="session_dir が見つかりません")
+    try:
+        session_store.append_diagnostics(payload.session_dir, payload.message)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"diagnostics.log の書き込みに失敗しました: {exc}")
+    return {"ok": True, "diagnostics_path": str(meeting_dir / session_store.DIAGNOSTICS_FILENAME)}
+
+
+@router.post("/repair_audio")
+def repair_audio(payload: RepairAudioRequest):
+    """強制終了でヘッダが古くなった recording.wav を実ファイル長から復旧する。"""
+    meeting_dir = Path(payload.session_dir)
+    if not meeting_dir.is_dir():
+        raise HTTPException(status_code=404, detail="session_dir が見つかりません")
+    audio_path = session_store.raw_audio_path(meeting_dir)
+    if not audio_path.is_file():
+        return {"ok": False, "reason": "not_found", "audio_path": str(audio_path), "seconds": 0.0}
+    try:
+        seconds = repair_wav_header(audio_path)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"録音ファイルの修復に失敗しました: {exc}")
+    return {"ok": True, "audio_path": str(audio_path), "seconds": round(seconds, 2)}

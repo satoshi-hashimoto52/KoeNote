@@ -101,6 +101,8 @@ body {
 .status-pill.tone-recording .dot { background: var(--error); animation: pulse 1.4s infinite; }
 .status-pill.tone-done .dot { background: var(--success); }
 .status-pill.tone-error .dot { background: var(--error); }
+/* 再接続中は「録音中」でも「エラー」でもない中間状態として見せる。 */
+.status-pill.tone-reconnecting .dot { background: #f59e0b; animation: pulse 0.7s infinite; }
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }
@@ -137,6 +139,7 @@ body {
 }
 .banner-error { background: rgba(239, 68, 68, 0.12); border-color: rgba(239, 68, 68, 0.4); color: #fca5a5; }
 .banner-warn { background: rgba(245, 158, 11, 0.12); border-color: rgba(245, 158, 11, 0.4); color: #fcd34d; }
+.banner-btn { margin-left: 12px; }
 .banner-ok { background: rgba(34, 197, 94, 0.12); border-color: rgba(34, 197, 94, 0.4); color: #86efac; }
 
 .field {
