@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { TranscriptView } from './components/TranscriptView';
+import { TRANSCRIPT_HEIGHT_KEY } from './components/transcriptHeight';
 import { useLiveTranscription } from './features/transcription/useLiveTranscription';
 import { primeAlertTone } from './features/transcription/alertTone';
 import {
@@ -58,6 +59,8 @@ export default function App() {
   const [model, setModel] = useState<LiveModel>('small');
   const [delayMode, setDelayMode] = useState<LiveDelayMode>('balanced');
   const [requestTemplate, setRequestTemplate] = useState('');
+  // 文字起こし欄の高さ（0008）。設定から復元し、変更時に保存する。
+  const [transcriptHeight, setTranscriptHeight] = useState<number | null>(null);
   const [mics, setMics] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState('');
 
@@ -94,6 +97,8 @@ export default function App() {
       if (s.delayMode === 'low_latency' || s.delayMode === 'balanced' || s.delayMode === 'accuracy')
         setDelayMode(s.delayMode);
       if (typeof s.requestTemplate === 'string') setRequestTemplate(s.requestTemplate);
+      // 高さは正規化を TranscriptView 側で行う。ここでは生値を渡すだけ（0008）。
+      if (s[TRANSCRIPT_HEIGHT_KEY] !== undefined) setTranscriptHeight(Number(s[TRANSCRIPT_HEIGHT_KEY]));
       setSettingsLoaded(true);
     })();
   }, [bridge]);
@@ -502,7 +507,15 @@ export default function App() {
               <button type="button" className="btn-mini" onClick={openTranscript} disabled={!transcriptPath || !bridge}>保存TXTを開く</button>
             </span>
           </div>
-          <TranscriptView committed={live.committed} partial={live.partial} />
+          <TranscriptView
+            committed={live.committed}
+            partial={live.partial}
+            savedHeight={transcriptHeight}
+            onHeightChange={(h) => {
+              setTranscriptHeight(h);
+              bridge?.setSettings({ [TRANSCRIPT_HEIGHT_KEY]: h }).catch(() => {});
+            }}
+          />
         </section>
 
         <section className="statusbar">

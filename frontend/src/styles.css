@@ -247,7 +247,10 @@ input.invalid {
   border-radius: var(--radius);
   width: 100%;
   min-width: 0;
-  height: clamp(260px, 42vh, 520px);
+  /* 高さは TranscriptView が style で与える（設定から復元・クランプ済み）。 */
+  /* 下端ドラッグで縦方向のみ伸縮する。resize には overflow が visible 以外である必要がある。 */
+  resize: vertical;
+  overflow: hidden;
 }
 .transcript-scroll {
   height: 100%;

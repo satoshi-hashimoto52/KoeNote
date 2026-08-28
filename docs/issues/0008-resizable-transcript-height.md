@@ -1,6 +1,6 @@
 # Issue #0008: 文字起こし欄の高さを可変にする
 
-- 状態: 未対応
+- 状態: **解決**（`transcriptHeight.ts` を新設。Vitest 18 件）
 - 起点コミット: `50c36e4`
 - 種別: enhancement
 - 影響: `TranscriptView` と設定の保存キー
@@ -45,3 +45,25 @@
 - 画面内優先の上限が適用される
 - 自動スクロールの追従判定が変わらない
 - Vitest でクランプと追従判定を検証する
+
+## 実装
+
+| ファイル | 内容 |
+| --- | --- |
+| `frontend/src/components/transcriptHeight.ts`（新規） | 採用値の定数、`normalizeTranscriptHeight`、`shouldPersistHeight` |
+| `frontend/src/components/TranscriptView.tsx` | `savedHeight` / `onHeightChange` を受け取り、`ResizeObserver` + 500ms デバウンスで保存 |
+| `frontend/src/styles.css` | `.transcript` に `resize: vertical; overflow: hidden;`。`height: clamp(...)` は撤去し `style` で与える |
+| `frontend/src/App.tsx` | 設定の読み書き（`transcriptHeight` キー） |
+
+- 伸縮は **CSS の `resize: vertical`** で行う。横方向は変わらない
+- `resize` を効かせるため `.transcript` に `overflow: hidden` を付けた。
+  内部スクロールは `.transcript-scroll` が `overflow-y: auto` で担うため維持される
+- 自動スクロールの `useLayoutEffect` は `committed` / `partial` 依存のまま**変更していない**。
+  高さ変更時は `ResizeObserver` 内で「追従中なら末尾へ寄せ直す」だけを行う
+- 保存は `ResizeObserver` → 500ms デバウンス → `setSettings`。ドラッグ中は書き込まない
+- 1px 未満の変化では書き込まない（`shouldPersistHeight`）
+
+## テスト（18 件）
+
+採用値 1 件 / クランプ 7 件（未設定・非数値・NaN・Infinity・0 以下・最小・最大・整数化・数値文字列）/
+画面内優先 5 件 / 保存抑制 2 件 / 自動スクロール追従判定 3 件。
