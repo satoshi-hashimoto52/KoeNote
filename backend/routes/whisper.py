@@ -14,7 +14,7 @@ from services.live_registry import registry
 from services.live_session import LiveSession, LiveSessionConfig
 from services.pcm_stream import BYTES_PER_SAMPLE, SAMPLE_RATE
 from services.transcriber import ALLOWED_EXTENSIONS, TranscriptionStageError, run_transcribe, save_upload_file
-from services.wav_recorder import AsyncWavAppender, CrashSafeWavWriter
+from services.wav_recorder import recorder_registry
 
 router = APIRouter(prefix="/api/whisper")
 live_router = APIRouter()
@@ -711,8 +711,10 @@ async def live_transcribe(websocket: WebSocket):
 
         if session.config.write_to_file and session.config.output_folder:
             try:
-                recorder = AsyncWavAppender(
-                    CrashSafeWavWriter(session_store.raw_audio_path(session.config.output_folder))
+                # WAV パス単位で所有権を取る。再接続が重なっても書き込み可能な
+                # recorder は 1 つだけになり、古い recorder はここで閉じられる（0013）。
+                recorder = recorder_registry.acquire(
+                    session_store.raw_audio_path(session.config.output_folder)
                 )
             except OSError as exc:
                 print(f"[WS] WARN recording_disabled msg={exc}", flush=True)
@@ -792,6 +794,10 @@ async def live_transcribe(websocket: WebSocket):
                             tails = []
                         for tail in tails:
                             await _emit_window(session, outbox, tail, 0)
+                        # session.json が done になる前に WAV の FD を解放する。
+                        # 以後この recorder へは追記できない（0013）。
+                        if recorder is not None:
+                            await asyncio.to_thread(recorder_registry.release, recorder)
                         final_result = session.finalize()
                         print(
                             f"[WS] session_final session={session.session_id} "
@@ -900,7 +906,9 @@ async def live_transcribe(websocket: WebSocket):
             except Exception:
                 pass
         if recorder is not None:
-            recorder.close()
+            # 所有者が入れ替わっていれば登録は触らず、自分の recorder だけ閉じる。
+            # 遅れて走る finally が新しい recorder を巻き込まないようにする（0013）。
+            recorder_registry.release(recorder)
         if session is not None:
             if stopped_normally:
                 registry.discard(session.session_id)

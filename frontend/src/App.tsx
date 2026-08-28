@@ -16,7 +16,6 @@ import {
   createSession,
   finalizeSession,
   getBridge,
-  postDiagnostics,
   repairAudio
 } from './services/api';
 
@@ -70,6 +69,8 @@ export default function App() {
   const [deviceId, setDeviceId] = useState('');
 
   const [sessionDir, setSessionDir] = useState<string | null>(null);
+  // Backend 再起動の多重実行を防ぐ（0012）。
+  const restartingRef = useRef(false);
   const [transcriptPath, setTranscriptPath] = useState<string | null>(null);
   const [transcriptReady, setTranscriptReady] = useState(false);
   const [banner, setBanner] = useState<{ tone: 'error' | 'warn' | 'ok'; text: string } | null>(null);
@@ -276,8 +277,20 @@ export default function App() {
       if (bridge && transcriptPath) {
         await bridge.appendTranscriptNotice(transcriptPath, line).catch(() => undefined);
       }
-      if (sessionDir) {
-        await postDiagnostics(sessionDir, line).catch(() => undefined);
+      // diagnostics.log は Backend の HTTP API を使わない。
+      // reason=backend_exit / no_heartbeat では Backend が死んでおり、
+      // API 経由の記録は原理的に失敗するため（0010）、main のローカル I/O で書く。
+      if (bridge && sessionDir) {
+        const written = await bridge
+          .appendDiagnostics(sessionDir, line)
+          .catch((error: unknown) => ({
+            ok: false,
+            reason: error instanceof Error ? error.message : 'ipc_failed'
+          }));
+        // 失敗を握り潰さない。記録が残らなかったことを利用者に見せる。
+        if (!written.ok) {
+          setBanner({ tone: 'warn', text: `diagnostics.log へ記録できませんでした（${written.reason ?? 'unknown'}）` });
+        }
       }
     },
     [bridge, transcriptPath, sessionDir]
@@ -294,14 +307,22 @@ export default function App() {
       live.reconnect();
       return;
     }
+    // main 側にも排他があるが（0012）、UI からの連打をここでも止めて
+    // 「再起動しています…」の表示が二重に走らないようにする。
+    if (restartingRef.current) return;
+    restartingRef.current = true;
     setBanner({ tone: 'warn', text: 'Backend を再起動しています…' });
-    const result = await bridge.restartBackend().catch(() => ({ ok: false }));
-    if (!result.ok) {
-      setBanner({ tone: 'error', text: 'Backend の再起動に失敗しました。アプリを再起動してください。' });
-      return;
+    try {
+      const result = await bridge.restartBackend().catch(() => ({ ok: false }));
+      if (!result.ok) {
+        setBanner({ tone: 'error', text: 'Backend の再起動に失敗しました。アプリを再起動してください。' });
+        return;
+      }
+      setBanner({ tone: 'ok', text: 'Backend を再起動しました。再接続します。' });
+      live.reconnect();
+    } finally {
+      restartingRef.current = false;
     }
-    setBanner({ tone: 'ok', text: 'Backend を再起動しました。再接続します。' });
-    live.reconnect();
   }, [bridge, live]);
 
   // --- マイGPTを開く（URL をブラウザで開くだけ。データ送信はしない） ---

@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { writeFile, mkdir, appendFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { getBackendLog, restartBackend } from '../backend';
+import { appendDiagnosticsLine } from './diagnostics';
 
 // マイGPT URL として開いてよいホスト（任意ドメインは開かない）。
 const ALLOWED_GPT_HOSTS = ['chatgpt.com', 'chat.openai.com'];
@@ -119,6 +120,17 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   ipcMain.handle('backend:restart', async () => {
     const ok = await restartBackend();
     return { ok };
+  });
+
+  // Backend が死んでいても記録できるよう、diagnostics.log はローカル I/O で書く。
+  // Backend の HTTP API 経由だと reason=backend_exit / no_heartbeat では必ず失敗する（0010）。
+  ipcMain.handle('diagnostics:append', async (_evt, sessionDir: string, text: string) => {
+    const result = await appendDiagnosticsLine(sessionDir, text);
+    if (!result.ok) {
+      // 握り潰さない。Electron のログに残して、後から追えるようにする。
+      console.error(`[diagnostics] 追記に失敗しました path=${result.path ?? sessionDir} reason=${result.reason}`);
+    }
+    return result;
   });
 
   ipcMain.handle('transcript:appendNotice', async (_evt, path: string, text: string) => {

@@ -16,6 +16,8 @@
     "build": "npm run typecheck && npm run build:electron && npm run build:renderer",
     "dist": "npm run build && electron-builder",
     "typecheck": "tsc --noEmit",
+    "test:unit": "vitest run --config vitest.config.ts",
+    "test:unit:watch": "vitest --config vitest.config.ts --watch",
     "test:backend": "cd backend && \"$(node -e \"const fs=require('fs');const v='../.venv/bin/python';process.stdout.write(fs.existsSync(v)?v:'python3')\")\" -m unittest discover -s tests -p 'test_*.py'",
     "preview": "vite preview"
   },
@@ -35,6 +37,7 @@
     "esbuild": "^0.23.0",
     "typescript": "^5.6.3",
     "vite": "^5.4.0",
+    "vitest": "^2.1.9",
     "wait-on": "^7.2.0"
   },
   "build": {

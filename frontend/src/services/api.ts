@@ -76,6 +76,11 @@ export function updateAttachments(sessionDir: string, attachments: string[]): Pr
 }
 
 /** 異常停止の記録を diagnostics.log に残す。事後解析のための唯一の永続ログ。 */
+/**
+ * Backend 経由で diagnostics.log へ書く。
+ * 異常記録には使わない（Backend 停止時に失敗するため。0010 で Electron のローカル I/O へ移行済み）。
+ * Backend が生きている前提の用途のために残す。
+ */
 export function postDiagnostics(sessionDir: string, message: string): Promise<{ ok: boolean }> {
   return postJson('/api/session/diagnostics', { session_dir: sessionDir, message });
 }

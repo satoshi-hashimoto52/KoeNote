@@ -27,6 +27,10 @@ const bridge = {
   appendTranscriptNotice: (path: string, text: string): Promise<{ ok: boolean; reason?: string }> =>
     ipcRenderer.invoke('transcript:appendNotice', path, text),
 
+  // diagnostics.log への追記。Backend の死活に依存しない（0010）。
+  appendDiagnostics: (sessionDir: string, text: string): Promise<{ ok: boolean; reason?: string }> =>
+    ipcRenderer.invoke('diagnostics:append', sessionDir, text),
+
   // 録音中フラグを main に伝え、終了確認ダイアログ・スリープ抑止の判断に使う。
   setRecordingState: (recording: boolean): void => {
     ipcRenderer.send('app:recordingState', recording);

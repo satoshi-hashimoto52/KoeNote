@@ -98,14 +98,34 @@ class CrashSafeWavWriter:
             if self._data_bytes - self._synced_bytes >= self.sync_interval_bytes:
                 self._rewrite_sizes_locked()
 
+    def _declared_data_bytes_locked(self) -> int:
+        """ヘッダへ書くデータ長。実ファイル長を下回らせない。
+
+        recorder は WebSocket 接続ごとに生成されるため（routes/whisper.py）、
+        再接続が重なると同じ WAV に複数の recorder が並ぶ。自分が書いた分しか
+        _data_bytes に持たない古い recorder が close でヘッダを書き戻すと、
+        repair_wav_header で実長へ直した値が巻き戻り、末尾が再生できなくなる。
+        実ファイル長との max を取ることで、宣言長が縮むことがなくなる（0013）。
+        """
+        try:
+            actual = os.fstat(self._fh.fileno()).st_size - RIFF_HEADER_SIZE
+        except OSError:
+            actual = 0
+        return max(self._data_bytes, max(0, actual))
+
     def _rewrite_sizes_locked(self) -> None:
         position = self._fh.tell()
         self._fh.seek(0)
-        self._fh.write(_wav_header(self._data_bytes, self.sample_rate, self.channels))
+        self._fh.write(_wav_header(self._declared_data_bytes_locked(), self.sample_rate, self.channels))
         self._fh.seek(position)
         self._fh.flush()
         os.fsync(self._fh.fileno())
         self._synced_bytes = self._data_bytes
+
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._fh is None
 
     def close(self) -> None:
         with self._lock:
@@ -142,6 +162,11 @@ class AsyncWavAppender:
     def queue_depth(self) -> int:
         with self._cond:
             return len(self._queue)
+
+    @property
+    def closed(self) -> bool:
+        with self._cond:
+            return self._closed
 
     @property
     def recorded_seconds(self) -> float:
@@ -184,3 +209,75 @@ class AsyncWavAppender:
             self._cond.notify()
         self._thread.join(timeout=10.0)
         self._writer.close()
+
+
+class RecorderRegistry:
+    """WAV パス単位で、書き込み可能な recorder を同時に 1 つだけに保つ。
+
+    recorder は WebSocket 接続ごとに作られる（routes/whisper.py）。所有権を
+    管理しないと、再接続が重なったときに同じ WAV へ複数の recorder が並び、
+
+      - 古い recorder が停止後も追記できてしまう
+      - 古い recorder の close が、修復済みヘッダを古い長さへ巻き戻す（0013）
+      - Backend 終了まで FD が解放されない
+
+    という状態になる。取得時に前の所有者を必ず閉じ、解放時は所有者が
+    自分自身のときだけ登録を外すことで、遅れて走る finally でも
+    新しい recorder を巻き込まない。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._owners: dict[str, "AsyncWavAppender"] = {}
+
+    @staticmethod
+    def _key(path) -> str:
+        return os.path.abspath(str(path))
+
+    def acquire(self, path) -> "AsyncWavAppender":
+        """path の所有権を取る。既存の所有者は flush して close する。"""
+        key = self._key(path)
+        with self._lock:
+            previous = self._owners.pop(key, None)
+        # close は書き込みスレッドの join を含むのでロックの外で行う。
+        if previous is not None:
+            previous.close()
+        recorder = AsyncWavAppender(CrashSafeWavWriter(path))
+        with self._lock:
+            self._owners[key] = recorder
+        return recorder
+
+    def release(self, recorder: "AsyncWavAppender") -> bool:
+        """recorder を閉じる。所有者が入れ替わっていれば登録は触らない。
+
+        戻り値は「解放時点で自分が所有者だったか」。
+        自分の recorder は常に close する（close は冪等）。
+        """
+        if recorder is None:
+            return False
+        key = self._key(recorder.path)
+        with self._lock:
+            owned = self._owners.get(key) is recorder
+            if owned:
+                self._owners.pop(key, None)
+        recorder.close()
+        return owned
+
+    def owner(self, path):
+        with self._lock:
+            return self._owners.get(self._key(path))
+
+    def close_all(self) -> None:
+        """Backend 終了時などに、残っている所有者をすべて閉じる。"""
+        with self._lock:
+            owners = list(self._owners.values())
+            self._owners.clear()
+        for recorder in owners:
+            recorder.close()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._owners)
+
+
+recorder_registry = RecorderRegistry()

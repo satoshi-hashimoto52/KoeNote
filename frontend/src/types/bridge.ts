@@ -28,6 +28,7 @@ export interface BridgeApi {
   getBackendLog(): Promise<string>;
   restartBackend(): Promise<{ ok: boolean }>;
   appendTranscriptNotice(path: string, text: string): Promise<{ ok: boolean; reason?: string }>;
+  appendDiagnostics(sessionDir: string, text: string): Promise<{ ok: boolean; reason?: string }>;
   setRecordingState(recording: boolean): void;
   notifyAnomaly(info: AnomalyInfo): void;
   onBackendExited(callback: (info: BackendExitInfo) => void): () => void;

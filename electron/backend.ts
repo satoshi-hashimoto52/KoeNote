@@ -3,12 +3,13 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { app } from 'electron';
 import http from 'node:http';
+import { classifyExit, createSingleFlight, type BackendExitReason } from './backend-lifecycle';
 
 export const BACKEND_HOST = '127.0.0.1';
 export const BACKEND_PORT = Number(process.env.BRIDGELOG_PORT || 8000);
 export const BACKEND_ORIGIN = `http://${BACKEND_HOST}:${BACKEND_PORT}`;
 
-export type BackendExitReason = 'exited' | 'crashed' | 'killed_possibly_oom';
+export type { BackendExitReason };
 
 export interface BackendExitInfo {
   code: number | null;
@@ -20,6 +21,8 @@ export interface BackendExitInfo {
 let backendProcess: ChildProcess | null = null;
 let exitListener: ((info: BackendExitInfo) => void) | null = null;
 let stoppingIntentionally = false;
+// 再起動の同時要求を 1 本に束ねる（0012）。
+const restartGuard = createSingleFlight<boolean>();
 const logBuffer: string[] = [];
 // realtime のログは窓ごと1行に絞ったので、この行数で数十分ぶんの履歴が残る。
 const MAX_LOG_LINES = 2000;
@@ -115,13 +118,7 @@ export async function waitForBackend(timeoutMs = 60000): Promise<boolean> {
   return false;
 }
 
-function classifyExit(code: number | null, signal: string | null): BackendExitReason {
-  // macOS の OOM kill は SIGKILL + code=null で現れる。
-  if (signal === 'SIGKILL' && code === null) return 'killed_possibly_oom';
-  if (signal !== null) return 'crashed';
-  if (code !== null && code !== 0) return 'crashed';
-  return 'exited';
-}
+
 
 export async function startBackend(onExit?: (info: BackendExitInfo) => void): Promise<void> {
   if (onExit) exitListener = onExit;
@@ -168,7 +165,7 @@ export async function startBackend(onExit?: (info: BackendExitInfo) => void): Pr
   backendProcess.stdout?.on('data', (d) => pushLog(`[backend] ${d}`));
   backendProcess.stderr?.on('data', (d) => pushImportantLog(`[backend] ${d}`));
   backendProcess.on('exit', (code, signal) => {
-    const reason = classifyExit(code, signal);
+    const reason = classifyExit(code, signal, stoppingIntentionally);
     pushImportantLog(`[backend] 終了 code=${code} signal=${signal} reason=${reason}\n`);
     backendProcess = null;
     // 明示的な停止（アプリ終了・再起動）は異常として通知しない。
@@ -217,10 +214,18 @@ export async function stopBackend(): Promise<void> {
 }
 
 export async function restartBackend(): Promise<boolean> {
-  pushImportantLog('[backend] 再起動を要求されました。\n');
-  await stopBackend();
-  await startBackend();
-  const healthy = await waitForBackend(30000);
-  pushImportantLog(`[backend] 再起動結果 healthy=${healthy}\n`);
-  return healthy;
+  // 進行中なら同じ Promise へ合流する。連打や複数経路からの要求で
+  // stopBackend -> startBackend が二重に走り、起動直後の Backend を
+  // 自分で停止してしまうのを防ぐ（0012）。
+  return restartGuard.run(
+    async () => {
+      pushImportantLog('[backend] 再起動を要求されました。\n');
+      await stopBackend();
+      await startBackend();
+      const healthy = await waitForBackend(30000);
+      pushImportantLog(`[backend] 再起動結果 healthy=${healthy}\n`);
+      return healthy;
+    },
+    () => pushImportantLog('[backend] 再起動が進行中のため、実行中の処理へ合流します。\n')
+  );
 }
