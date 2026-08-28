@@ -1,7 +1,7 @@
 """BridgeLog の会議セッション（フォルダ・メタデータ）管理。
 
 会議ごとに専用ディレクトリ `YYYYMMDD_<safe_title>/` を作り、
-session.json / attachments.json を原子的に書き込む。元資料は移動・削除しない。
+session.json を原子的に書き込む。
 """
 import json
 import re
@@ -15,7 +15,6 @@ from .file_utils import write_text_file
 TRANSCRIPT_FILENAME = "transcript.txt"
 SEGMENTS_FILENAME = "transcript_segments.json"
 SESSION_FILENAME = "session.json"
-ATTACHMENTS_FILENAME = "attachments.json"
 DIAGNOSTICS_FILENAME = "diagnostics.log"
 AUDIO_DIRNAME = "audio"
 RAW_AUDIO_FILENAME = "recording.wav"
@@ -75,11 +74,9 @@ def create_meeting_directory(
     output_base: str,
     title: str,
     gpt_url: str = "",
-    attachments: Optional[list[str]] = None,
     create_base_if_missing: bool = True,
 ) -> dict:
-    """会議ディレクトリを作り、session.json / attachments.json を書き出す。"""
-    attachments = attachments or []
+    """会議ディレクトリを作り、session.json を書き出す。"""
     base = Path(output_base).expanduser()
     if not base.exists():
         if not create_base_if_missing:
@@ -111,16 +108,13 @@ def create_meeting_directory(
         "segments_path": SEGMENTS_FILENAME,
         # 録音音声は文字起こしとは別系統で保存する（推論が落ちても録音は残る）。
         "audio_path": f"{AUDIO_DIRNAME}/{RAW_AUDIO_FILENAME}",
-        "attachments": list(attachments),
     }
     write_session(meeting_dir, session)
-    write_attachments(meeting_dir, attachments)
     return {
         "session_dir": str(meeting_dir),
         "transcript_path": str(meeting_dir / TRANSCRIPT_FILENAME),
         "segments_path": str(meeting_dir / SEGMENTS_FILENAME),
         "session_json_path": str(meeting_dir / SESSION_FILENAME),
-        "attachments_json_path": str(meeting_dir / ATTACHMENTS_FILENAME),
         "diagnostics_path": str(meeting_dir / DIAGNOSTICS_FILENAME),
         "audio_path": str(meeting_dir / AUDIO_DIRNAME / RAW_AUDIO_FILENAME),
         "transcript_filename": TRANSCRIPT_FILENAME,
@@ -130,19 +124,6 @@ def create_meeting_directory(
 
 def write_session(meeting_dir: Path, session: dict) -> None:
     write_text_file(Path(meeting_dir) / SESSION_FILENAME, json.dumps(session, ensure_ascii=False, indent=2) + "\n")
-
-
-def write_attachments(meeting_dir: Path, attachments: list[str]) -> None:
-    records = []
-    for path in attachments:
-        p = Path(path).expanduser()
-        records.append({
-            "path": str(p),
-            "name": p.name,
-            "exists": p.exists(),
-        })
-    payload = {"attachments": records, "updated_at": _now_iso()}
-    write_text_file(Path(meeting_dir) / ATTACHMENTS_FILENAME, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
 def read_session(meeting_dir: str) -> dict:

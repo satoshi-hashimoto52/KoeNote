@@ -4,7 +4,7 @@
 ネイティブ操作（ダイアログ・Finder・クリップボード・URL 起動）は Electron 側の責務。
 """
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -19,7 +19,6 @@ class CreateSessionRequest(BaseModel):
     title: str
     output_base: str
     gpt_url: str = ""
-    attachments: List[str] = []
     create_base_if_missing: bool = True
 
 
@@ -31,11 +30,6 @@ class FinalizeSessionRequest(BaseModel):
 
 class CheckOutputRequest(BaseModel):
     output_base: str
-
-
-class UpdateAttachmentsRequest(BaseModel):
-    session_dir: str
-    attachments: List[str] = []
 
 
 class DiagnosticsRequest(BaseModel):
@@ -64,7 +58,6 @@ def create(payload: CreateSessionRequest):
             output_base=payload.output_base,
             title=title,
             gpt_url=payload.gpt_url,
-            attachments=payload.attachments,
             create_base_if_missing=payload.create_base_if_missing,
         )
     except FileNotFoundError as exc:
@@ -81,21 +74,6 @@ def finalize(payload: FinalizeSessionRequest):
         return session_store.finalize_session(payload.session_dir, payload.status, payload.ended_at)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"session.json の更新に失敗しました: {exc}")
-
-
-@router.post("/attachments")
-def update_attachments(payload: UpdateAttachmentsRequest):
-    meeting_dir = Path(payload.session_dir)
-    if not meeting_dir.is_dir():
-        raise HTTPException(status_code=404, detail="session_dir が見つかりません")
-    try:
-        session_store.write_attachments(meeting_dir, payload.attachments)
-        session = session_store.read_session(payload.session_dir)
-        session["attachments"] = list(payload.attachments)
-        session_store.write_session(meeting_dir, session)
-        return {"ok": True}
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"attachments.json の更新に失敗しました: {exc}")
 
 
 @router.post("/diagnostics")

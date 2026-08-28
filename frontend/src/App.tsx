@@ -19,12 +19,6 @@ import {
   repairAudio
 } from './services/api';
 
-interface Attachment {
-  path: string;
-  name: string;
-  exists: boolean;
-}
-
 const GPT_URL_PREFIXES = ['https://chatgpt.com/', 'https://chat.openai.com/'];
 
 function baseName(p: string): string {
@@ -60,7 +54,6 @@ export default function App() {
 
   const [title, setTitle] = useState('');
   const [gptUrl, setGptUrl] = useState('');
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [saveFolder, setSaveFolder] = useState('');
   const [model, setModel] = useState<LiveModel>('small');
   const [delayMode, setDelayMode] = useState<LiveDelayMode>('balanced');
@@ -141,39 +134,6 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [bridge, recording]);
 
-  // --- 資料 ---
-  const addAttachments = useCallback(async () => {
-    if (!bridge) {
-      setBanner({ tone: 'warn', text: 'Electron 環境でのみ資料を追加できます' });
-      return;
-    }
-    const picked = await bridge.pickAttachments();
-    if (!picked.length) return;
-    setAttachments((prev) => {
-      const existingPaths = new Set(prev.map((a) => a.path));
-      const additions = picked
-        .filter((p) => !existingPaths.has(p)) // 同一ファイルの重複登録禁止
-        .map((p) => ({ path: p, name: baseName(p), exists: true }));
-      return [...prev, ...additions];
-    });
-  }, [bridge]);
-
-  const removeAttachment = useCallback((path: string) => {
-    setAttachments((prev) => prev.filter((a) => a.path !== path));
-  }, []);
-
-  const verifyAttachments = useCallback(async () => {
-    if (!bridge || attachments.length === 0) return;
-    const results = await bridge.pathExists(attachments.map((a) => a.path));
-    const map = new Map(results.map((r) => [r.path, r.exists]));
-    setAttachments((prev) => prev.map((a) => ({ ...a, exists: map.get(a.path) ?? a.exists })));
-  }, [bridge, attachments]);
-
-  useEffect(() => {
-    verifyAttachments().catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attachments.length]);
-
   // --- 保存先 ---
   const pickFolder = useCallback(async () => {
     if (!bridge) {
@@ -214,8 +174,7 @@ export default function App() {
       const session = await createSession({
         title: title.trim(),
         output_base: saveFolder.trim(),
-        gpt_url: gptUrl.trim(),
-        attachments: attachments.map((a) => a.path)
+        gpt_url: gptUrl.trim()
       });
       setSessionDir(session.session_dir);
       setTranscriptPath(session.transcript_path);
@@ -240,7 +199,6 @@ export default function App() {
     title,
     saveFolder,
     gptUrl,
-    attachments,
     live,
     model,
     delayMode,
@@ -493,33 +451,6 @@ export default function App() {
         </section>
 
         <section className="field">
-          <div className="field-head">
-            <label>資料</label>
-            <button type="button" className="btn-ghost" onClick={addAttachments}>＋ 追加</button>
-          </div>
-          {attachments.length === 0 ? (
-            <p className="hint">＋ から資料を追加できます（任意）</p>
-          ) : (
-            <ul className="attachments">
-              {attachments.map((a) => (
-                <li key={a.path} className={a.exists ? '' : 'missing'}>
-                  <span className="att-name" title={a.path}>{a.name}</span>
-                  {!a.exists ? <span className="att-warn">見つかりません</span> : null}
-                  <span className="att-actions">
-                    {bridge ? (
-                      <button type="button" className="btn-mini" onClick={() => bridge.revealInFinder(a.path)}>
-                        Finder
-                      </button>
-                    ) : null}
-                    <button type="button" className="btn-mini" onClick={() => removeAttachment(a.path)}>×</button>
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-
-        <section className="field">
           <label htmlFor="folder">文字起こしファイル保存先</label>
           <div className="inline">
             <input
@@ -684,7 +615,7 @@ export default function App() {
             <h3>現在の表示内容をクリアしますか？</h3>
             <p className="modal-note">
               会議／セミナータイトル、文字起こしテキスト、録音進捗が初期化されます。
-              {'\n'}マイGPTのURL・資料・保存先・入力設定は保持されます。
+              {'\n'}マイGPTのURL・保存先・入力設定は保持されます。
               {'\n\n'}保存済みの文字起こしファイルは削除されません。
             </p>
             <div className="modal-actions">

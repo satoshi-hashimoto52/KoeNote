@@ -10,7 +10,6 @@ const bridge = {
     ipcRenderer.invoke('settings:set', data),
 
   pickFolder: (): Promise<string | null> => ipcRenderer.invoke('dialog:pickFolder'),
-  pickAttachments: (): Promise<string[]> => ipcRenderer.invoke('dialog:pickAttachments'),
   pickAudioFile: (): Promise<string | null> => ipcRenderer.invoke('dialog:pickAudioFile'),
 
   pathExists: (paths: string[]): Promise<Array<{ path: string; exists: boolean }>> =>

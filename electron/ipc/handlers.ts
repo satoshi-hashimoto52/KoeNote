@@ -6,11 +6,6 @@ import { getBackendLog, restartBackend } from '../backend';
 import { appendDiagnosticsLine } from './diagnostics';
 import { isAllowedGptUrl, openGptUrl, openInChromeMac } from './openExternal';
 
-const ATTACHMENT_FILTERS = [
-  { name: '対応ファイル', extensions: ['pdf', 'txt', 'md', 'doc', 'docx', 'ppt', 'pptx', 'png', 'jpg', 'jpeg'] },
-  { name: 'すべてのファイル', extensions: ['*'] }
-];
-
 const AUDIO_FILTERS = [
   { name: '音声/動画', extensions: ['mp4', 'mov', 'm4v', 'mkv', 'avi', 'webm', 'mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'opus'] }
 ];
@@ -55,16 +50,6 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
       properties: ['openDirectory', 'createDirectory']
     });
     return result.canceled ? null : result.filePaths[0];
-  });
-
-  ipcMain.handle('dialog:pickAttachments', async () => {
-    const win = getWindow();
-    const result = await dialog.showOpenDialog(win!, {
-      title: '資料を選択',
-      properties: ['openFile', 'multiSelections'],
-      filters: ATTACHMENT_FILTERS
-    });
-    return result.canceled ? [] : result.filePaths;
   });
 
   ipcMain.handle('dialog:pickAudioFile', async () => {

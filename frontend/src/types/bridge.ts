@@ -19,7 +19,6 @@ export interface BridgeApi {
   getSettings(): Promise<Record<string, unknown>>;
   setSettings(data: Record<string, unknown>): Promise<Record<string, unknown>>;
   pickFolder(): Promise<string | null>;
-  pickAttachments(): Promise<string[]>;
   pickAudioFile(): Promise<string | null>;
   pathExists(paths: string[]): Promise<Array<{ path: string; exists: boolean }>>;
   revealInFinder(path: string): Promise<boolean>;

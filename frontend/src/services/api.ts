@@ -48,7 +48,6 @@ export interface CreatedSession {
   transcript_path: string;
   segments_path: string;
   session_json_path: string;
-  attachments_json_path: string;
   diagnostics_path: string;
   transcript_filename: string;
   session: Record<string, unknown>;
@@ -62,17 +61,12 @@ export function createSession(params: {
   title: string;
   output_base: string;
   gpt_url: string;
-  attachments: string[];
 }): Promise<CreatedSession> {
   return postJson<CreatedSession>('/api/session/create', params);
 }
 
 export function finalizeSession(sessionDir: string, status = 'done'): Promise<Record<string, unknown>> {
   return postJson('/api/session/finalize', { session_dir: sessionDir, status });
-}
-
-export function updateAttachments(sessionDir: string, attachments: string[]): Promise<{ ok: boolean }> {
-  return postJson('/api/session/attachments', { session_dir: sessionDir, attachments });
 }
 
 /** 異常停止の記録を diagnostics.log に残す。事後解析のための唯一の永続ログ。 */
@@ -93,10 +87,7 @@ export function repairAudio(
 }
 
 /** マイGPTへ渡す依頼文を生成する。設定で編集した本文があれば優先する。 */
-export function buildRequestText(title: string, attachmentNames: string[], template?: string): string {
-  const names = attachmentNames.length
-    ? attachmentNames.map((name) => `・${name}`).join('\n')
-    : '（なし）';
+export function buildRequestText(title: string, template?: string): string {
   const base =
     template && template.trim()
       ? template
@@ -107,10 +98,15 @@ export function buildRequestText(title: string, attachmentNames: string[], templ
 
 添付ファイル：
 ・文字起こしテキスト
-{attachment_names}
 
 文字起こしには音声認識による誤字が含まれる可能性があります。
-資料に正式な表記がある場合は、資料の表記を優先してください。
-発言または資料から確認できない内容を、推測で追加しないでください。`;
-  return base.replace('{title}', title).replace('{attachment_names}', names);
+発言から確認できない内容を、推測で追加しないでください。`;
+  return (
+    base
+      .replace('{title}', title)
+      // 旧テンプレート互換: 資料機能の削除前に保存された requestTemplate に
+      // {attachment_names} が残っていることがある。そのまま GPT へ渡さないよう空文字にする。
+      // ユーザー設定は書き換えない（0007）。
+      .replace(/\{attachment_names\}\n?/g, '')
+  );
 }
