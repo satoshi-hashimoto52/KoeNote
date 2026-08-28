@@ -2,6 +2,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { wsOrigin } from '../../services/api';
 import { playAlertTone } from './alertTone';
 import {
+  NO_MARK,
+  beginSession,
+  isTranscriptionStalled,
+  stalledForMs,
+  updateProcessedMark,
+  type ProcessedMark
+} from './watchdog';
+import {
   CAPTURE_SAMPLE_RATE,
   FRAME_SAMPLES,
   startPcmCapture,
@@ -153,7 +161,7 @@ export function useLiveTranscription(): LiveState {
   const startedAtRef = useRef(0);
   const lastHeartbeatAtRef = useRef(0);
   const lastFrameAtRef = useRef(0);
-  const lastProcessedRef = useRef({ value: 0, at: 0 });
+  const lastProcessedRef = useRef<ProcessedMark>(NO_MARK);
   const watchdogTimerRef = useRef<number | null>(null);
   // 異常は 1 回だけ通知する。毎tick鳴らすと警告音とOS通知が毎秒繰り返される。
   const anomalyRaisedRef = useRef(false);
@@ -329,9 +337,10 @@ export function useLiveTranscription(): LiveState {
         return;
       }
       // 無音でも processed_audio_seconds は進むので、これが止まるのは本当の停止。
-      const stalledFor = now - lastProcessedRef.current.at;
-      if (lastProcessedRef.current.at > 0 && stalledFor > TRANSCRIPTION_STALL_MS) {
+      // セッション切替と初回進捗前の扱いは watchdog.ts で判定する（0011）。
+      if (isTranscriptionStalled(lastProcessedRef.current, now, TRANSCRIPTION_STALL_MS)) {
         watchdogReasonRef.current = 'transcription_stalled';
+        const stalledFor = stalledForMs(lastProcessedRef.current, now);
         raiseAnomaly('transcription_stalled', `${Math.round(stalledFor / 1000)} 秒間 文字起こしが進んでいません`, true);
       }
     }, WATCHDOG_TICK_MS);
@@ -429,11 +438,12 @@ export function useLiveTranscription(): LiveState {
         case 'heartbeat': {
           lastHeartbeatAtRef.current = Date.now();
           const processed = Number(data.processed_audio_seconds ?? 0);
-          if (processed > lastProcessedRef.current.value) {
-            lastProcessedRef.current = { value: processed, at: Date.now() };
-          } else if (lastProcessedRef.current.at === 0) {
-            lastProcessedRef.current = { value: processed, at: Date.now() };
-          }
+          lastProcessedRef.current = updateProcessedMark(
+            lastProcessedRef.current,
+            sessionIdRef.current,
+            processed,
+            Date.now()
+          );
           setProgress({
             recordedSeconds: Number(data.recorded_seconds ?? 0),
             receivedAudioSeconds: Number(data.received_audio_seconds ?? 0),
@@ -567,7 +577,7 @@ export function useLiveTranscription(): LiveState {
       sentSamplesRef.current = 0;
       lastHeartbeatAtRef.current = 0;
       lastFrameAtRef.current = 0;
-      lastProcessedRef.current = { value: 0, at: 0 };
+      lastProcessedRef.current = NO_MARK;
       startedAtRef.current = Date.now();
       optionsRef.current = opts;
 
@@ -709,7 +719,8 @@ export function useLiveTranscription(): LiveState {
     reconnectAttemptRef.current = 0;
     watchdogReasonRef.current = null;
     lastHeartbeatAtRef.current = Date.now();
-    lastProcessedRef.current = { value: lastProcessedRef.current.value, at: Date.now() };
+    // 旧セッションの値を持ち越さない。Backend 再起動で processed は 0 から数え直しになる（0011）。
+    lastProcessedRef.current = beginSession(sessionIdRef.current, Date.now());
     startedAtRef.current = Date.now();
     appendLog('[RT] 手動で再接続します');
     socketRef.current?.close();
