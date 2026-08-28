@@ -36,8 +36,9 @@ interface AnomalyInfo {
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 960,
-    height: 900,
+    // 0015: 320px 幅を常用する前提の初期サイズ。手動での拡大・縮小は従来どおり。
+    width: 320,
+    height: 530,
     // 0009: 狭いウィンドウでも主要操作を使えるようにする。
     // Renderer 側は 380px / 340px のブレークポイントで縦積みへ切り替える。
     minWidth: 320,

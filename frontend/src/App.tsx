@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { TranscriptView } from './components/TranscriptView';
 import { TRANSCRIPT_HEIGHT_KEY } from './components/transcriptHeight';
+import { SettingsModal } from './components/SettingsModal';
+import { GearIcon } from './components/GearIcon';
+import { resolveRecordButton } from './components/recordButton';
 import { useLiveTranscription } from './features/transcription/useLiveTranscription';
 import { primeAlertTone } from './features/transcription/alertTone';
 import {
@@ -61,6 +64,10 @@ export default function App() {
   const [requestTemplate, setRequestTemplate] = useState('');
   // 文字起こし欄の高さ（0008）。設定から復元し、変更時に保存する。
   const [transcriptHeight, setTranscriptHeight] = useState<number | null>(null);
+  // 設定モーダル（0015）
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // 開始処理中フラグ。連打と「開始中…」表示に使う（0015）。
+  const [starting, setStarting] = useState(false);
   const [mics, setMics] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState('');
 
@@ -139,16 +146,6 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [bridge, recording]);
 
-  // --- 保存先 ---
-  const pickFolder = useCallback(async () => {
-    if (!bridge) {
-      setBanner({ tone: 'warn', text: 'Electron 環境でのみフォルダを選択できます' });
-      return;
-    }
-    const folder = await bridge.pickFolder();
-    if (folder) setSaveFolder(folder);
-  }, [bridge]);
-
   // --- 録音開始/停止 ---
   const chunkSeconds = LIVE_PRESETS[delayMode].chunk;
   const overlapSeconds = LIVE_PRESETS[delayMode].overlap;
@@ -165,6 +162,8 @@ export default function App() {
       setBanner({ tone: 'error', text: '文字起こし保存先を指定してください' });
       return;
     }
+    // 開始処理中は「開始中…」を出し、連打を止める（0015）。
+    setStarting(true);
     try {
       const check = await checkOutput(saveFolder);
       if (!check.exists && !check.writable) {
@@ -199,6 +198,8 @@ export default function App() {
     } catch (error) {
       const message = error instanceof Error ? error.message : '録音開始に失敗しました';
       setBanner({ tone: 'error', text: message });
+    } finally {
+      setStarting(false);
     }
   }, [
     title,
@@ -398,15 +399,39 @@ export default function App() {
 
   const phaseLabel = finalizing ? '確定処理中…' : statusLabel(live.status);
 
+  // 開始／停止を統合したボタンの状態（0015）。
+  const recordButton = resolveRecordButton({
+    recording,
+    starting,
+    finalizing,
+    anomaly: Boolean(live.anomaly)
+  });
+
   return (
     <div className="app">
       <header className="titlebar">
-        <div className="titlebar-drag">
+        {/* 左: macOS の traffic lights 用の余白。文字は置かない。 */}
+        <div className="titlebar-lead" aria-hidden="true" />
+        {/* 中央: タイトル。省略しない。 */}
+        <div className="titlebar-center">
           <span className="brand">BridgeLog</span>
         </div>
-        <span className={`status-pill tone-${statusTone}`}>
-          <span className="dot" /> {phaseLabel}
-        </span>
+        <div className="titlebar-trail">
+          {/* 狭幅では CSS で隠す。録音進捗パネルに同じ情報がある。 */}
+          <span className={`status-pill tone-${statusTone}`}>
+            <span className="dot" /> {phaseLabel}
+          </span>
+          <button
+            type="button"
+            className="icon-btn gear"
+            onClick={() => setSettingsOpen(true)}
+            disabled={recording}
+            aria-label="設定を開く"
+            title={recording ? '録音中は設定を変更できません' : '設定'}
+          >
+            <GearIcon />
+          </button>
+        </div>
       </header>
 
       <main className="content">
@@ -430,73 +455,20 @@ export default function App() {
           </div>
         ) : null}
 
-        <section className="field">
-          <label htmlFor="title">会議／セミナータイトル<span className="req">必須</span></label>
+        {/* 1 行 1 項目のコンパクト表示（0015）。表示ラベルは短縮し、正式名称は aria-label / title に残す。 */}
+        <section className="field-row">
+          <label htmlFor="title" title="会議／セミナータイトル">
+            タイトル<span className="req">必須</span>
+          </label>
           <input
             id="title"
             type="text"
-            placeholder="例: AIモデル、そのままデバイスに載せていませんか？"
+            aria-label="会議／セミナータイトル"
+            placeholder="例: AIモデルをデバイスに載せる"
             value={title}
             disabled={recording}
             onChange={(e) => setTitle(e.target.value)}
           />
-        </section>
-
-        <section className="field">
-          <label htmlFor="gpturl">マイGPTのURL</label>
-          <input
-            id="gpturl"
-            type="text"
-            placeholder="https://chatgpt.com/g/g-xxxxxxxx"
-            value={gptUrl}
-            className={gptUrl && !gptUrlValid ? 'invalid' : ''}
-            onChange={(e) => setGptUrl(e.target.value)}
-          />
-          {gptUrl && !gptUrlValid ? <p className="hint hint-error">chatgpt.com のURLを入力してください</p> : null}
-        </section>
-
-        <section className="field">
-          <label htmlFor="folder">文字起こしファイル保存先</label>
-          <div className="inline">
-            <input
-              id="folder"
-              type="text"
-              placeholder="/Users/you/Documents/BridgeLog"
-              value={saveFolder}
-              disabled={recording}
-              onChange={(e) => setSaveFolder(e.target.value)}
-            />
-            <button type="button" className="btn-ghost" onClick={pickFolder} disabled={recording}>選択</button>
-          </div>
-        </section>
-
-        <section className="field row-3">
-          <div>
-            <label htmlFor="mic">入力デバイス</label>
-            <select id="mic" value={deviceId} onChange={(e) => setDeviceId(e.target.value)} disabled={recording}>
-              <option value="">既定入力</option>
-              {mics.map((m, i) => (
-                <option key={m.deviceId || i} value={m.deviceId}>{m.label || `マイク ${i + 1}`}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label htmlFor="model">モデル</label>
-            <select id="model" value={model} onChange={(e) => setModel(e.target.value as LiveModel)} disabled={recording}>
-              <option value="tiny">tiny</option>
-              <option value="base">base</option>
-              <option value="small">small（推奨）</option>
-              <option value="medium">medium</option>
-            </select>
-          </div>
-          <div>
-            <label htmlFor="delay">遅延モード</label>
-            <select id="delay" value={delayMode} onChange={(e) => setDelayMode(e.target.value as LiveDelayMode)} disabled={recording}>
-              <option value="low_latency">低遅延 (8s/2s)</option>
-              <option value="balanced">標準 (10s/2s)</option>
-              <option value="accuracy">精度優先 (12s/3s)</option>
-            </select>
-          </div>
         </section>
 
         <section className="field">
@@ -518,53 +490,70 @@ export default function App() {
           />
         </section>
 
+        {/* 3 行構成のコンパクト表示（0015）。情報は削除せず、長い値は省略して title で補う。 */}
         <section className="statusbar">
-          <span>{formatElapsed(elapsedSec)}</span>
-          <span>入力: {live.deviceLabel}</span>
-          <span className="level-meter" title={`入力レベル(RMS)=${live.inputLevel.toFixed(4)}`}>
-            レベル
-            <span className="level-track">
-              <span
-                className={`level-fill ${live.inputLevel < 0.001 && recording ? 'silent' : ''}`}
-                style={{ width: `${Math.min(100, live.inputLevel * 400)}%` }}
-              />
+          <div className="status-line">
+            <span className="mono">{formatElapsed(elapsedSec)}</span>
+            <span className="ellipsis" title={`入力デバイス: ${live.deviceLabel}`}>入力: {live.deviceLabel}</span>
+          </div>
+          <div className="status-line">
+            <span className="level-meter" title={`入力レベル(RMS)=${live.inputLevel.toFixed(4)}`}>
+              <span className="level-track">
+                <span
+                  className={`level-fill ${live.inputLevel < 0.001 && recording ? 'silent' : ''}`}
+                  style={{ width: `${Math.min(100, live.inputLevel * 400)}%` }}
+                />
+              </span>
             </span>
-          </span>
-          <span>状態: {phaseLabel}</span>
-          <span title="Backend が最後に音声を受信した時刻">音声: {formatIsoTime(live.progress.lastAudioReceivedAt)}</span>
-          <span title="最後に文字起こしが完了した時刻">文字起こし: {formatIsoTime(live.progress.lastTranscriptionAt)}</span>
-          {live.savedPath ? <span className="saved-path" title={live.savedPath}>保存: {baseName(live.savedPath)}</span> : null}
+          </div>
+          <div className="status-line">
+            <span title={`状態: ${phaseLabel}`}>{phaseLabel}</span>
+            <span title="Backend が最後に音声を受信した時刻">音声:{formatIsoTime(live.progress.lastAudioReceivedAt)}</span>
+            <span title="最後に文字起こしが完了した時刻">文字:{formatIsoTime(live.progress.lastTranscriptionAt)}</span>
+            {live.savedPath ? (
+              <span className="saved-path ellipsis" title={`保存先: ${live.savedPath}`}>保存:{baseName(live.savedPath)}</span>
+            ) : null}
+          </div>
         </section>
 
-        <section className="actions">
-          <div className="actions-left">
-            <button type="button" className="btn-primary" onClick={startRecording} disabled={recording || finalizing}>
-              文字起こし開始
-            </button>
-            <button type="button" className="btn-danger" onClick={stopRecording} disabled={!recording}>
-              停止
-            </button>
-          </div>
-          <div className="actions-right">
-            <button
-              type="button"
-              className="btn-ghost"
-              onClick={onClearClick}
-              disabled={!canClear}
-              title={!canClear ? '録音中・確定処理中はクリアできません' : '画面表示をリセット（保存ファイルは削除しません）'}
-            >
-              クリア
-            </button>
-            <button
-              type="button"
-              className="btn-accent"
-              onClick={openGpt}
-              disabled={!gptUrlValid}
-              title={!gptUrlValid ? '有効な chatgpt.com のURLを入力してください' : 'マイGPT をブラウザで開く'}
-            >
-              マイGPTを開く
-            </button>
-          </div>
+        {/* 開始／停止・クリア・マイGPT を 1 行に並べる（0015）。 */}
+        <section className="actions-main">
+          <button
+            type="button"
+            className={recordButton.tone === 'danger' ? 'btn-danger' : 'btn-primary'}
+            onClick={() => {
+              if (recordButton.action === 'start') void startRecording();
+              else if (recordButton.action === 'stop') void stopRecording();
+            }}
+            disabled={recordButton.disabled}
+            aria-label={recordButton.ariaLabel}
+            title={recordButton.ariaLabel}
+          >
+            {recordButton.label}
+          </button>
+          <button
+            type="button"
+            className="btn-ghost"
+            onClick={onClearClick}
+            disabled={!canClear}
+            title={!canClear ? '録音中・確定処理中はクリアできません' : '画面表示をリセット（保存ファイルは削除しません）'}
+          >
+            クリア
+          </button>
+          <button
+            type="button"
+            className="btn-accent"
+            onClick={openGpt}
+            disabled={!gptUrlValid}
+            aria-label="マイGPTをGoogle Chromeで開く"
+            title={
+              !gptUrlValid
+                ? '設定でマイGPTのURLを入力してください'
+                : 'マイGPTをGoogle Chromeで開く'
+            }
+          >
+            マイGPT
+          </button>
         </section>
 
         <details className="diag" onToggle={(e) => live.setDebug((e.currentTarget as HTMLDetailsElement).open)}>
@@ -638,6 +627,26 @@ export default function App() {
           </div>
         </div>
       ) : null}
+      <SettingsModal
+        open={settingsOpen}
+        current={{ gptUrl, saveFolder, deviceId, model, delayMode }}
+        mics={mics}
+        recording={recording}
+        onPickFolder={async () => (bridge ? bridge.pickFolder() : null)}
+        onCheckFolder={async (path) => {
+          if (!bridge) return undefined;
+          const results = await bridge.pathExists([path]);
+          return results[0]?.exists;
+        }}
+        onSave={(next) => {
+          setGptUrl(next.gptUrl);
+          setSaveFolder(next.saveFolder);
+          setDeviceId(next.deviceId);
+          setModel(next.model);
+          setDelayMode(next.delayMode);
+        }}
+        onClose={() => setSettingsOpen(false)}
+      />
     </div>
   );
 }

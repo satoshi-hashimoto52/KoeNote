@@ -11,6 +11,9 @@
   --warn: #f59e0b;
   --error: #ef4444;
   --radius: 10px;
+  /* 文字起こし本文。フォームラベル(12px)と同程度に抑える（0015）。 */
+  --font-transcript: 13px;
+  --font-transcript-line: 1.65;
   font-synthesis: none;
 }
 
@@ -44,26 +47,70 @@ body {
 }
 
 /* --- Title bar (native-ish) --- */
+/* 3 分割グリッド。左は traffic lights の余白、中央にタイトル、右に操作（0015）。 */
 .titlebar {
-  display: flex;
+  display: grid;
+  /* 左右を等幅にすることでタイトルが確実にウィンドウ中央へ来る。
+     左は macOS の traffic lights が収まる 78px を下限にする。 */
+  grid-template-columns: minmax(78px, 1fr) auto minmax(78px, 1fr);
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  height: 44px;
-  padding: 0 16px 0 84px; /* macOS の信号機ボタン分を空ける */
+  gap: 8px;
+  height: 40px;
+  padding: 0;
   background: var(--card);
   border-bottom: 1px solid var(--border);
   -webkit-app-region: drag;
   flex: none;
   min-width: 0;
 }
-
-.titlebar-drag {
+/* macOS の信号機ボタン領域。文字は置かない。 */
+.titlebar-lead {
+  height: 100%;
+}
+.titlebar-center {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: center;
   min-width: 0;
 }
+.titlebar-trail {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  /* 右端の余白はここで確定させる（0015）。 */
+  padding-right: 7px;
+}
+/* 操作要素はドラッグ領域から外す。 */
+.titlebar-trail button,
+.titlebar-trail .status-pill {
+  -webkit-app-region: no-drag;
+}
+/* アイコンボタン。タップ領域 32x32、アイコン本体は 18x18 の SVG（0015）。 */
+.icon-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  border-radius: 8px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+.icon-btn > svg { width: 18px; height: 18px; display: block; }
+.icon-btn:hover:not(:disabled) { color: var(--fg); }
+.icon-btn:active:not(:disabled) { background: var(--input); color: var(--fg); }
+/* 通常時に枠を残さない。キーボード操作のときだけリングを出す。 */
+.icon-btn:focus { outline: none; }
+.icon-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.icon-btn:disabled { opacity: 0.35; cursor: default; }
 
 .brand {
   overflow: hidden;
@@ -292,9 +339,11 @@ input.invalid {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
-  font-size: 15px;
-  line-height: 1.7;
+  font-size: var(--font-transcript);
+  line-height: var(--font-transcript-line);
+  font-weight: 400;
 }
+/* 色と装飾による区別は維持する（確定 / 認識中 / プレースホルダー）。 */
 .transcript-committed { color: var(--fg); }
 .transcript-partial { color: var(--muted); font-style: italic; }
 .transcript-empty { color: var(--muted); }
@@ -364,6 +413,14 @@ input.invalid {
   color: var(--muted);
   font-size: 13px;
   user-select: none;
+  border-radius: 6px;
+}
+/* マウスで開閉したときに既定の太い枠を残さない。
+   キーボード操作のときだけ紫系リングを出す（0015）。 */
+.diag > summary:focus { outline: none; }
+.diag > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .diag-tools {
   display: flex;
@@ -471,6 +528,9 @@ button {
   align-items: center;
   justify-content: center;
   z-index: 50;
+  /* 小さいウィンドウでもモーダルを画面内に収める（0015）。 */
+  padding: 12px;
+  overflow: auto;
 }
 .modal {
   background: var(--card);
@@ -478,6 +538,9 @@ button {
   border-radius: 14px;
   padding: 22px;
   width: min(480px, 90vw);
+  /* 縦に収まらない場合はモーダル内部をスクロールさせる（0015）。 */
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
 }
 .modal h3 { margin: 0 0 8px; }
 .modal-note { color: var(--muted); font-size: 13px; margin: 0 0 14px; white-space: pre-line; }
@@ -535,6 +598,103 @@ button {
 /* 340px 以下: 文字サイズと余白を最小構成にする。 */
 @media (max-width: 340px) {
   .content { padding: 12px 10px; }
-  .titlebar { padding-left: 10px; padding-right: 10px; }
+  /* ヘッダーの余白はグリッドと .titlebar-trail が担う。ここで上書きしない（0015）。 */
   .diag-log { font-size: 11px; }
+}
+
+/* --- コンパクト UI（0015）--- */
+/* ラベル + 入力を 1 行に。ラベル幅は固定しすぎない。 */
+.field-row {
+  display: grid;
+  grid-template-columns: minmax(56px, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.field-row > label {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.field-row > input {
+  min-width: 0;
+  width: 100%;
+}
+.btn-pick { flex: none; white-space: nowrap; }
+
+/* 開始／停止・クリア・マイGPT を 1 行に（0015）。
+   開始／停止を最も広く、クリアを最も狭く、マイGPT は折り返さない幅を確保する。 */
+.actions-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(64px, 0.9fr) minmax(78px, 1.1fr);
+  gap: 7px;
+  align-items: stretch;
+}
+.actions-main button {
+  width: 100%;
+  min-width: 0;
+  font-size: 13px;
+  padding-left: 8px;
+  padding-right: 8px;
+  white-space: nowrap;
+}
+
+/* ステータスを 3 行構成にまとめる。 */
+.status-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+.status-line .ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.status-line .mono { font-variant-numeric: tabular-nums; flex: none; }
+.statusbar .level-meter { width: 100%; }
+.statusbar .level-track { width: auto; flex: 1; min-width: 40px; }
+
+/* 設定モーダル。320px でも見切れない。 */
+.settings-modal { width: min(420px, calc(100vw - 24px)); padding: 18px; }
+.settings-modal h3 { margin: 0 0 12px; }
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+  min-width: 0;
+}
+.settings-field > label { font-size: 12px; color: var(--muted); }
+.settings-field > select,
+.settings-field > input { width: 100%; min-width: 0; }
+/* 保存先の入力と「選択」ボタンを 1 行に。320px でも見切れない。 */
+.settings-inline {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+.settings-inline > input {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.settings-field .hint { margin: 4px 0 0; }
+
+/* 狭幅ではヘッダーの状態ピルを隠す（録音進捗パネルに同じ情報がある）。 */
+@media (max-width: 520px) {
+  .titlebar-trail .status-pill { display: none; }
+}
+@media (max-width: 380px) {
+  /* 0009 の縦積みは actions-main には効かせない（3 ボタンの 1 行を維持する）。 */
+  .actions-main {
+    grid-template-columns: minmax(0, 1.3fr) minmax(64px, 0.9fr) minmax(78px, 1.1fr);
+    gap: 6px;
+  }
+  .actions-main button { width: 100%; font-size: 12px; padding-left: 6px; padding-right: 6px; }
 }
