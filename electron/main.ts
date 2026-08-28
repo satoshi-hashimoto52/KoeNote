@@ -38,8 +38,10 @@ function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 960,
     height: 900,
-    minWidth: 460,
-    minHeight: 650,
+    // 0009: 狭いウィンドウでも主要操作を使えるようにする。
+    // Renderer 側は 380px / 340px のブレークポイントで縦積みへ切り替える。
+    minWidth: 320,
+    minHeight: 480,
     backgroundColor: '#09090B',
     titleBarStyle: 'hiddenInset',
     title: 'BridgeLog',

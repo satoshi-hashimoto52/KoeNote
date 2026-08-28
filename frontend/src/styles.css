@@ -469,3 +469,40 @@ button {
 }
 .modal-files li.missing { border-color: rgba(245, 158, 11, 0.5); color: var(--warn); }
 .modal-actions { display: flex; justify-content: flex-end; }
+
+/* --- 狭幅対応（0009）--- */
+/* 420px 以下: 設定行を 1 列に保ち、余白をさらに詰める。 */
+@media (max-width: 420px) {
+  .content { padding: 14px 12px; gap: 12px; }
+  .row-3 { grid-template-columns: 1fr; }
+}
+
+/* 380px 以下: 主要ボタンを縦積みにして、常に押せる幅を確保する。
+   ボタン文字は button { white-space: nowrap } で 1 文字ずつ折り返さない。 */
+@media (max-width: 380px) {
+  .actions {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .actions-left,
+  .actions-right {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .actions button {
+    width: 100%;
+  }
+  /* 入力レベルメーターの固定幅をやめ、行内で伸縮させる。 */
+  .level-meter { width: 100%; }
+  .level-track { width: auto; flex: 1; min-width: 40px; }
+  .statusbar { gap: 6px 10px; }
+}
+
+/* 340px 以下: 文字サイズと余白を最小構成にする。 */
+@media (max-width: 340px) {
+  .content { padding: 12px 10px; }
+  .titlebar { padding-left: 10px; padding-right: 10px; }
+  .diag-log { font-size: 11px; }
+}
