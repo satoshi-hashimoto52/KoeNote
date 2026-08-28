@@ -16,7 +16,7 @@ const bridge = {
   pathExists: (paths: string[]): Promise<Array<{ path: string; exists: boolean }>> =>
     ipcRenderer.invoke('fs:pathExists', paths),
   revealInFinder: (path: string): Promise<boolean> => ipcRenderer.invoke('shell:revealInFinder', path),
-  openExternal: (url: string): Promise<{ ok: boolean; reason?: string }> =>
+  openExternal: (url: string): Promise<{ ok: boolean; opener?: 'chrome' | 'default'; reason?: string }> =>
     ipcRenderer.invoke('shell:openExternal', url),
   writeClipboard: (text: string): Promise<boolean> => ipcRenderer.invoke('clipboard:write', text),
   getBackendLog: (): Promise<string> => ipcRenderer.invoke('backend:log'),

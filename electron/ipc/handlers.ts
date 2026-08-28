@@ -4,9 +4,7 @@ import { writeFile, mkdir, appendFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { getBackendLog, restartBackend } from '../backend';
 import { appendDiagnosticsLine } from './diagnostics';
-
-// マイGPT URL として開いてよいホスト（任意ドメインは開かない）。
-const ALLOWED_GPT_HOSTS = ['chatgpt.com', 'chat.openai.com'];
+import { isAllowedGptUrl, openGptUrl, openInChromeMac } from './openExternal';
 
 const ATTACHMENT_FILTERS = [
   { name: '対応ファイル', extensions: ['pdf', 'txt', 'md', 'doc', 'docx', 'ppt', 'pptx', 'png', 'jpg', 'jpeg'] },
@@ -39,17 +37,6 @@ async function writeSettingsAtomic(data: Record<string, unknown>): Promise<void>
   await writeFile(tmp, JSON.stringify(data, null, 2), 'utf-8');
   const { rename } = await import('node:fs/promises');
   await rename(tmp, target);
-}
-
-function isAllowedGptUrl(rawUrl: string): boolean {
-  try {
-    const url = new URL(rawUrl);
-    if (url.protocol !== 'https:') return false;
-    const host = url.hostname.toLowerCase();
-    return ALLOWED_GPT_HOSTS.some((allowed) => host === allowed || host.endsWith(`.${allowed}`));
-  } catch {
-    return false;
-  }
 }
 
 export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void {
@@ -102,13 +89,13 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
     return false;
   });
 
-  ipcMain.handle('shell:openExternal', async (_evt, url: string) => {
-    if (!isAllowedGptUrl(url)) {
-      return { ok: false, reason: 'disallowed_domain' };
-    }
-    await shell.openExternal(url);
-    return { ok: true };
-  });
+  // マイGPT は Google Chrome で開く。無ければ既定ブラウザへフォールバックする（0006）。
+  ipcMain.handle('shell:openExternal', (_evt, url: string) =>
+    openGptUrl(url, {
+      openInChrome: openInChromeMac,
+      openDefault: (target) => shell.openExternal(target)
+    })
+  );
 
   ipcMain.handle('clipboard:write', (_evt, text: string) => {
     clipboard.writeText(String(text ?? ''));

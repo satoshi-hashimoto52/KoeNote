@@ -23,7 +23,7 @@ export interface BridgeApi {
   pickAudioFile(): Promise<string | null>;
   pathExists(paths: string[]): Promise<Array<{ path: string; exists: boolean }>>;
   revealInFinder(path: string): Promise<boolean>;
-  openExternal(url: string): Promise<{ ok: boolean; reason?: string }>;
+  openExternal(url: string): Promise<{ ok: boolean; opener?: 'chrome' | 'default'; reason?: string }>;
   writeClipboard(text: string): Promise<boolean>;
   getBackendLog(): Promise<string>;
   restartBackend(): Promise<{ ok: boolean }>;

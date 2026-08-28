@@ -71,6 +71,8 @@ export default function App() {
   const [sessionDir, setSessionDir] = useState<string | null>(null);
   // Backend 再起動の多重実行を防ぐ（0012）。
   const restartingRef = useRef(false);
+  // マイGPT の連打で複数タブを開かない（0006）。
+  const openingGptRef = useRef(false);
   const [transcriptPath, setTranscriptPath] = useState<string | null>(null);
   const [transcriptReady, setTranscriptReady] = useState(false);
   const [banner, setBanner] = useState<{ tone: 'error' | 'warn' | 'ok'; text: string } | null>(null);
@@ -353,10 +355,27 @@ export default function App() {
       setBanner({ tone: 'warn', text: 'Electron 環境でのみブラウザを開けます' });
       return;
     }
-    // Main プロセスの shell.openExternal（許可ドメイン検証つき）を IPC 経由で呼ぶ。
-    const opened = await bridge.openExternal(gptUrl.trim());
-    if (!opened.ok) {
-      setBanner({ tone: 'error', text: '許可されていない URL です（chatgpt.com のみ開けます）' });
+    // 連打で複数タブを開かない。
+    if (openingGptRef.current) return;
+    openingGptRef.current = true;
+    try {
+      // Main プロセス側で許可ドメインを検証し、Chrome → 既定ブラウザの順に開く（0006）。
+      const opened = await bridge.openExternal(gptUrl.trim());
+      if (!opened.ok) {
+        setBanner({
+          tone: 'error',
+          text:
+            opened.reason === 'disallowed_domain'
+              ? '許可されていない URL です（chatgpt.com のみ開けます）'
+              : `ブラウザを開けませんでした（${opened.reason ?? 'unknown'}）`
+        });
+        return;
+      }
+      if (opened.opener === 'default') {
+        setBanner({ tone: 'warn', text: 'Google Chrome が見つからないため、既定のブラウザで開きました' });
+      }
+    } finally {
+      openingGptRef.current = false;
     }
   }, [bridge, gptUrl, gptUrlValid]);
 
