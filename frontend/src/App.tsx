@@ -510,8 +510,8 @@ export default function App() {
           <TranscriptView
             committed={live.committed}
             partial={live.partial}
-            savedHeight={transcriptHeight}
-            onHeightChange={(h) => {
+            preferredHeight={transcriptHeight}
+            onPreferredHeightChange={(h) => {
               setTranscriptHeight(h);
               bridge?.setSettings({ [TRANSCRIPT_HEIGHT_KEY]: h }).catch(() => {});
             }}

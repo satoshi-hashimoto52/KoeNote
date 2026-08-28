@@ -2,42 +2,67 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import {
   MAX_TRANSCRIPT_HEIGHT,
   MIN_TRANSCRIPT_HEIGHT,
-  SAVE_DEBOUNCE_MS,
-  normalizeTranscriptHeight,
+  availableHeightFor,
+  computeEffectiveHeight,
+  heightFromDrag,
+  normalizePreferredHeight,
   shouldPersistHeight
 } from './transcriptHeight';
 
 interface Props {
   committed: string;
   partial: string;
-  /** 設定から復元した高さ。未設定なら既定値を使う。 */
-  savedHeight?: number | null;
-  /** ドラッグ完了後に呼ばれる。連続書き込みはこの中で起きない。 */
-  onHeightChange?: (height: number) => void;
+  /** 設定から復元した「ユーザーの希望高さ」。未設定なら既定値。 */
+  preferredHeight?: number | null;
+  /** ユーザー操作で希望高さが決まったときだけ呼ばれる。レイアウト変化では呼ばれない。 */
+  onPreferredHeightChange?: (height: number) => void;
 }
+
+/** キーボード操作 1 回あたりの変化量。 */
+const KEY_STEP = 24;
 
 /**
  * 確定全文(committed) + 認識中(partial) を表示する。
  * 自動スクロールし、ユーザーが上へスクロールしたら追従を止める。
- * 下端ドラッグで縦方向に伸縮できる（0008）。
+ *
+ * 高さは専用ハンドルのドラッグで変える（0008）。
+ * CSS の `resize: vertical` + ResizeObserver は使わない。
+ * ResizeObserver は内容ボックス（ボーダーを除いた高さ）を返すため、
+ * その値を保存すると 2px ずつ縮み続けるフィードバックループになる。
  */
-export function TranscriptView({ committed, partial, savedHeight, onHeightChange }: Props) {
+export function TranscriptView({
+  committed,
+  partial,
+  preferredHeight,
+  onPreferredHeightChange
+}: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const boxRef = useRef<HTMLDivElement | null>(null);
   const [autoFollow, setAutoFollow] = useState(true);
-  const [height, setHeight] = useState(() =>
-    normalizeTranscriptHeight(savedHeight, typeof window !== 'undefined' ? window.innerHeight : undefined)
+
+  // ユーザーの希望高さ。ウィンドウ変化では動かさない。
+  const [preferred, setPreferred] = useState(() => normalizePreferredHeight(preferredHeight));
+  // ドラッグ中の一時的な表示高さ。確定するまで保存しない。
+  const [dragging, setDragging] = useState<number | null>(null);
+  const [available, setAvailable] = useState(() =>
+    availableHeightFor(typeof window !== 'undefined' ? window.innerHeight : undefined)
   );
-  const saveTimerRef = useRef<number | null>(null);
-  const lastSavedRef = useRef(height);
+  const dragStartRef = useRef<{ y: number; height: number; pointerId: number } | null>(null);
 
   // 設定の読み込みが後から届く場合に追従する。
   useEffect(() => {
-    if (savedHeight === undefined || savedHeight === null) return;
-    const next = normalizeTranscriptHeight(savedHeight, window.innerHeight);
-    setHeight(next);
-    lastSavedRef.current = next;
-  }, [savedHeight]);
+    if (preferredHeight === undefined || preferredHeight === null) return;
+    setPreferred(normalizePreferredHeight(preferredHeight));
+  }, [preferredHeight]);
+
+  // ウィンドウの縦方向の伸縮に追従する。preferred は変えない。
+  useEffect(() => {
+    const onResize = () => setAvailable(availableHeightFor(window.innerHeight));
+    onResize();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  const effective = computeEffectiveHeight(dragging ?? preferred, available);
 
   const onScroll = () => {
     const el = scrollRef.current;
@@ -53,42 +78,61 @@ export function TranscriptView({ committed, partial, savedHeight, onHeightChange
     }
   }, [committed, partial, autoFollow]);
 
-  const persist = useCallback(
+  // 高さが変わったときも、追従中なら末尾へ寄せ直す。
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (el && autoFollow) el.scrollTop = el.scrollHeight;
+  }, [effective, autoFollow]);
+
+  const commitPreferred = useCallback(
     (next: number) => {
-      if (!onHeightChange || !shouldPersistHeight(lastSavedRef.current, next)) return;
-      if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
-      // ドラッグ中は何度も発火するので、落ち着いてから 1 回だけ書く。
-      saveTimerRef.current = window.setTimeout(() => {
-        saveTimerRef.current = null;
-        lastSavedRef.current = next;
-        onHeightChange(next);
-      }, SAVE_DEBOUNCE_MS);
+      const normalized = normalizePreferredHeight(next);
+      setPreferred((prev) => {
+        if (onPreferredHeightChange && shouldPersistHeight(prev, normalized)) {
+          onPreferredHeightChange(normalized);
+        }
+        return normalized;
+      });
     },
-    [onHeightChange]
+    [onPreferredHeightChange]
   );
 
-  // resize: vertical による高さ変更を拾う。
-  useEffect(() => {
-    const box = boxRef.current;
-    if (!box || typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver((entries) => {
-      const next = Math.round(entries[0]?.contentRect.height ?? 0);
-      if (next <= 0) return;
-      persist(next);
-      // 伸縮後も末尾に追従しているなら、末尾へ寄せ直す。
-      const el = scrollRef.current;
-      if (el && autoFollow) el.scrollTop = el.scrollHeight;
-    });
-    observer.observe(box);
-    return () => observer.disconnect();
-  }, [persist, autoFollow]);
+  const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    dragStartRef.current = { y: event.clientY, height: effective, pointerId: event.pointerId };
+    setDragging(effective);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
 
-  useEffect(
-    () => () => {
-      if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
-    },
-    []
-  );
+  const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const start = dragStartRef.current;
+    if (!start || start.pointerId !== event.pointerId) return;
+    // 縦方向だけ見る。横移動は無視する。
+    setDragging(heightFromDrag(start.height, event.clientY - start.y));
+  };
+
+  const endDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    const start = dragStartRef.current;
+    if (!start || start.pointerId !== event.pointerId) return;
+    dragStartRef.current = null;
+    const next = dragging;
+    setDragging(null);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    // ドラッグ終了時に 1 回だけ保存する。
+    if (next !== null) commitPreferred(next);
+  };
+
+  const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      commitPreferred(preferred - KEY_STEP);
+    } else if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      commitPreferred(preferred + KEY_STEP);
+    }
+  };
 
   const jumpToLatest = () => {
     const el = scrollRef.current;
@@ -101,26 +145,40 @@ export function TranscriptView({ committed, partial, savedHeight, onHeightChange
   const empty = !committed && !partial;
 
   return (
-    <div
-      className="transcript"
-      ref={boxRef}
-      style={{ height, minHeight: MIN_TRANSCRIPT_HEIGHT, maxHeight: MAX_TRANSCRIPT_HEIGHT }}
-    >
-      <div className="transcript-scroll" ref={scrollRef} onScroll={onScroll}>
-        {empty ? (
-          <span className="transcript-empty">ここに文字起こしが表示されます</span>
-        ) : (
-          <>
-            <span className="transcript-committed">{committed}</span>
-            {partial ? <span className="transcript-partial"> {partial}</span> : null}
-          </>
-        )}
+    <div className="transcript-wrap">
+      <div className="transcript" style={{ height: effective }}>
+        <div className="transcript-scroll" ref={scrollRef} onScroll={onScroll}>
+          {empty ? (
+            <span className="transcript-empty">ここに文字起こしが表示されます</span>
+          ) : (
+            <>
+              <span className="transcript-committed">{committed}</span>
+              {partial ? <span className="transcript-partial"> {partial}</span> : null}
+            </>
+          )}
+        </div>
+        {!autoFollow ? (
+          <button type="button" className="transcript-jump" onClick={jumpToLatest}>
+            ↓ 最新位置へ戻る
+          </button>
+        ) : null}
       </div>
-      {!autoFollow ? (
-        <button type="button" className="transcript-jump" onClick={jumpToLatest}>
-          ↓ 最新位置へ戻る
-        </button>
-      ) : null}
+      <div
+        className={`transcript-resizer${dragging !== null ? ' dragging' : ''}`}
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="文字起こし欄の高さ"
+        aria-valuenow={effective}
+        aria-valuemin={MIN_TRANSCRIPT_HEIGHT}
+        aria-valuemax={MAX_TRANSCRIPT_HEIGHT}
+        tabIndex={0}
+        title="ドラッグで高さを変更（↑↓キーでも変更できます）"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onKeyDown={onKeyDown}
+      />
     </div>
   );
 }

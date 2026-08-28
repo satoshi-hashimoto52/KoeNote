@@ -1,8 +1,13 @@
 /**
- * 文字起こし欄の高さの正規化（0008）。
+ * 文字起こし欄の高さ計算（0008）。
  *
- * 設定に保存した値を復元するとき、異常値・古い値・極端に大きい値をそのまま
- * 使うと画面が破綻する。保存値より「画面内に収まること」を優先する。
+ * 「ユーザーが希望した高さ」と「いまのウィンドウで実際に表示できる高さ」を分ける。
+ *
+ * - `preferredHeight`  : ユーザーがハンドルを操作したときだけ更新し、設定へ保存する
+ * - `effectiveHeight`  : preferredHeight と利用可能領域から計算する表示値。保存しない
+ *
+ * ウィンドウを縮めて effectiveHeight が小さくなっても preferredHeight は変えない。
+ * そのためウィンドウを広げれば元の希望高さへ戻る。
  */
 
 export const TRANSCRIPT_HEIGHT_KEY = 'transcriptHeight';
@@ -11,30 +16,49 @@ export const MIN_TRANSCRIPT_HEIGHT = 180;
 export const MAX_TRANSCRIPT_HEIGHT = 1200;
 /** ウィンドウ高さに対して文字起こし欄が占めてよい上限。 */
 export const VIEWPORT_RATIO = 0.7;
-/** 高さ変更を設定へ書き戻すまでの待ち時間。ドラッグ中の連続書き込みを避ける。 */
-export const SAVE_DEBOUNCE_MS = 500;
 
 /**
- * 保存値・未設定値を実際に使う高さへ正規化する。
+ * 保存値・未設定値を希望高さへ正規化する。
  *
- * - 数値でない / NaN / 0 以下 → 既定値
- * - 最小・最大でクランプ
- * - ウィンドウが小さいときは `viewportHeight * VIEWPORT_RATIO` を優先する
- *   （ただし最小高さは下回らせない）
+ * **ここではウィンドウサイズを一切見ない。** 見てしまうと、小さいウィンドウで
+ * クランプした結果が希望高さとして保存され、二度と元に戻らなくなる。
  */
-export function normalizeTranscriptHeight(raw: unknown, viewportHeight?: number): number {
+export function normalizePreferredHeight(raw: unknown): number {
   const parsed = typeof raw === 'number' ? raw : Number(raw);
-  let height =
+  const height =
     Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TRANSCRIPT_HEIGHT;
+  return Math.round(Math.min(Math.max(height, MIN_TRANSCRIPT_HEIGHT), MAX_TRANSCRIPT_HEIGHT));
+}
 
-  height = Math.min(Math.max(height, MIN_TRANSCRIPT_HEIGHT), MAX_TRANSCRIPT_HEIGHT);
+/** いまのウィンドウで文字起こし欄に割り当ててよい高さ。 */
+export function availableHeightFor(viewportHeight: unknown): number {
+  const h = typeof viewportHeight === 'number' ? viewportHeight : Number(viewportHeight);
+  if (!Number.isFinite(h) || h <= 0) return MAX_TRANSCRIPT_HEIGHT;
+  // 360 * 0.7 が 251.999… になるなど誤差が出るため floor ではなく round を使う。
+  return Math.max(Math.round(h * VIEWPORT_RATIO), MIN_TRANSCRIPT_HEIGHT);
+}
 
-  if (Number.isFinite(viewportHeight) && (viewportHeight as number) > 0) {
-    const viewportLimit = Math.floor((viewportHeight as number) * VIEWPORT_RATIO);
-    // 画面内に収めることを保存値より優先する。ただし最小は割らない。
-    height = Math.max(Math.min(height, viewportLimit), MIN_TRANSCRIPT_HEIGHT);
-  }
-  return Math.round(height);
+/**
+ * 実際に表示する高さ。
+ *
+ * `clamp(preferredHeight, MIN, availableHeight)`。
+ * 戻り値は表示にだけ使い、**保存してはいけない**。
+ */
+export function computeEffectiveHeight(preferredHeight: number, availableHeight: number): number {
+  const limit = Math.max(availableHeight, MIN_TRANSCRIPT_HEIGHT);
+  return Math.round(Math.min(Math.max(preferredHeight, MIN_TRANSCRIPT_HEIGHT), limit));
+}
+
+/**
+ * ドラッグ量から希望高さを求める。横方向の移動は呼び出し側で無視する。
+ *
+ * 上へ大きく動かした結果が 0 以下になっても「不正値」ではないので、
+ * 既定値へ飛ばさず最小値でクランプする（`normalizePreferredHeight` とは扱いが異なる）。
+ */
+export function heightFromDrag(startHeight: number, deltaY: number): number {
+  const raw = startHeight + deltaY;
+  if (!Number.isFinite(raw)) return DEFAULT_TRANSCRIPT_HEIGHT;
+  return Math.round(Math.min(Math.max(raw, MIN_TRANSCRIPT_HEIGHT), MAX_TRANSCRIPT_HEIGHT));
 }
 
 /** 保存する価値のある変化か（1px 未満の揺れで書き込まない）。 */

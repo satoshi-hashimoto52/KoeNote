@@ -240,6 +240,10 @@ input.invalid {
 .hint-error { color: #fca5a5; }
 
 /* --- Transcript --- */
+.transcript-wrap {
+  width: 100%;
+  min-width: 0;
+}
 .transcript {
   position: relative;
   background: var(--card);
@@ -247,10 +251,38 @@ input.invalid {
   border-radius: var(--radius);
   width: 100%;
   min-width: 0;
-  /* 高さは TranscriptView が style で与える（設定から復元・クランプ済み）。 */
-  /* 下端ドラッグで縦方向のみ伸縮する。resize には overflow が visible 以外である必要がある。 */
-  resize: vertical;
   overflow: hidden;
+  /* 高さは TranscriptView が style で与える（希望高さと利用可能領域から算出）。
+     CSS の resize は使わない。ResizeObserver 経由で保存すると内容ボックス基準の
+     値が書き戻され、ボーダー分だけ縮み続けるため（0008）。 */
+}
+/* 縦リサイズ専用ハンドル。横方向には効かない。 */
+.transcript-resizer {
+  height: 12px;
+  margin-top: 2px;
+  border-radius: 6px;
+  cursor: ns-resize;
+  touch-action: none;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.transcript-resizer::before {
+  content: '';
+  width: 48px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border);
+}
+.transcript-resizer:hover::before,
+.transcript-resizer:focus-visible::before,
+.transcript-resizer.dragging::before {
+  background: var(--accent);
+}
+.transcript-resizer:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .transcript-scroll {
   height: 100%;
