@@ -12,14 +12,72 @@
 > 本アプリは以前 **BridgeLog** という名称でした。`docs/` 配下の受け入れ試験記録や Issue には
 > 当時の名称が残っていますが、当時の記録として意図的に維持しています。
 
+## ドキュメント
+
+設計・運用の詳細は [`docs/00_PROJECT_OVERVIEW.md`](docs/00_PROJECT_OVERVIEW.md) を入口としてください。
+
+| 文書 | 内容 |
+|---|---|
+| [00 概要](docs/00_PROJECT_OVERVIEW.md) | 課題・機能・技術・実行/ビルド/テスト |
+| [01 アーキテクチャ](docs/01_ARCHITECTURE.md) | 構成・データフロー・状態管理・通信 |
+| [02 ディレクトリ構成](docs/02_DIRECTORY_STRUCTURE.md) | 各フォルダと主要ファイルの役割 |
+| [03 技術スタック](docs/03_TECH_STACK.md) | ライブラリ一覧・用途・バージョン |
+| [04 ビルドと実行](docs/04_BUILD_AND_RUN.md) | 実在するコマンド一覧 |
+| [05 コーディング規約](docs/05_CODING_CONVENTIONS.md) | 命名・エラー処理・非同期・型 |
+| [06 API リファレンス](docs/06_API_REFERENCE.md) | HTTP / WebSocket の仕様 |
+| [07 データ](docs/07_DATABASE.md) | DB なし。ファイル永続化の仕様 |
+| [08 設定](docs/08_CONFIGURATION.md) | 設定キー・環境変数・既定値 |
+| [09 AI 開発ガイド](docs/09_AI_DEVELOPMENT_GUIDE.md) | 編集してよい場所・実装ルール |
+| [10 既知の制約](docs/10_KNOWN_LIMITATIONS.md) | 未解決 Issue・技術的制約 |
+| [CLAUDE.md](docs/CLAUDE.md) | Claude Code 向けの指示書 |
+| [Issue 一覧](docs/issues/) | 0001〜0018 の調査・修正記録 |
+
+## 画面（0015 / 0017 / 0018）
+
+**320×530 を常用する前提のコンパクト UI** です。ウィンドウは手動で拡大・縮小できます。
+
+- **タイトル**は表示ラベルを持たず、`タイトルを入力（必須）` の placeholder で入力します
+  （アクセシビリティ名は `aria-label` に残しています）。
+- **録音ステータス**は `● 録音中` を 1 つの表示にまとめ、この領域で最も目立たせます。
+  音声時刻と文字起こし時刻はラベルを省略せず、**380px 以下では自動的に 2 行**へ切り替わります。
+  保存先は時刻とは別の行に置きます。項目の隣の「ⓘ」は hover / フォーカス時だけ説明を出し、
+  本体の文字情報に被らない位置へ表示します。
+- **入力欄とボタン**はアプリ背景から明確に浮く配色にしています。色は `:root` の CSS 変数
+  （`--field-*` / `--btn-neutral-*` / `--focus-ring` / `--disabled-opacity`）へ集約しています。
+  キーボード操作時だけ `:focus-visible` で紫の枠とリングを出し、
+  マウスクリック後にフォーカス枠を残しません。
+- **ウィンドウの不透明度**を設定から **70〜100%**（5% 刻み、初期値 100%）で変更できます。
+  `BrowserWindow.setOpacity()` を使うため、文字が薄くなることはありません。
+  スライダー操作中はライブプレビューし、キャンセル / Escape / 背景クリックでは元の値へ戻ります。
+
+## 入力デバイスの安全なフォールバック（0016）
+
+Chromium は入力デバイスの `deviceId` を **origin ごとに異なる値へソルト**します。
+開発版（`http://localhost:5173`）で保存した ID は、パッケージ版（`file://`）には存在しません。
+
+そのため保存値をそのまま使わず、**必ず現在のデバイス一覧と照合**します。
+
+| 状況 | 動作 |
+|---|---|
+| 保存 ID が一覧にある | その ID を使う |
+| ID は無効だが**保存したデバイス名と一意に一致**する入力がある | 現在の ID へ**再解決**する |
+| 一致しない／同名が複数ある | **既定の入力デバイス**を使い、通知を出す |
+
+- フォールバックの通知は**表示から 8 秒で自動的に消えます**（録音は妨げません）。
+  マイク権限の拒否など、ユーザー操作が必要な通知は消えません。
+- **フォールバックしただけでは保存設定を書き換えません。**
+  USB マイクを一時的に外しているだけの場合に、内蔵マイクを恒久設定にしないためです。
+  設定画面で選び直して保存したときだけ `deviceId` と `deviceLabel` を永続化します。
+
 ### 設定の保存先
 
 `~/Library/Application Support/KoeNote/koenote-settings.json`
 
 旧 BridgeLog を使っていた場合、KoeNote 側にまだ設定が無い初回起動時に限り、
 `~/Library/Application Support/BridgeLog/bridgelog-settings.json` から
-`gptUrl` / `saveFolder` / `deviceId` / `model` / `delayMode` / `requestTemplate` /
-`transcriptHeight` を引き継ぎます。旧設定は読み取るだけで、変更も削除もしません。
+`gptUrl` / `saveFolder` / `deviceId` / `deviceLabel` / `model` / `delayMode` /
+`requestTemplate` / `transcriptHeight` / `windowOpacity` を引き継ぎます。
+旧設定は読み取るだけで、変更も削除もしません。
 KoeNote 側に既に設定がある場合は移行しません。
 
 ---
@@ -89,8 +147,9 @@ npm run dev
 ```
 
 - Vite（Renderer, `http://localhost:5173`）と Electron が起動します。
-- Electron が Python Backend（`uvicorn main:app`, `127.0.0.1:8000`）を**自動で起動**し、
+- Electron が Python Backend（`127.0.0.1:8765`）を**自動で起動**し、
   アプリ終了時に**自動で停止**します（Worker / ffmpeg の残留を防止）。
+  ポートは環境変数 `KOENOTE_PORT` で変更できます。
 - `.venv` があればその Python を優先使用します。無い場合は `python3`。
 
 補助スクリプト: `scripts/start_app.command`（ダブルクリック起動）。
@@ -263,9 +322,19 @@ ffmpeg -y -i sample.aiff -ac 1 -ar 16000 -f s16le sample.pcm
 ## テスト
 
 ```bash
-# Backend ユニットテスト（53件。2時間相当の連続動作テストを含み、約8秒で完走）
-npm run test:backend
+npm run typecheck     # tsc --noEmit
+npm run test:unit     # Vitest（TypeScript）
+npm run test:backend  # unittest（Python）
 ```
+
+現在の件数（実測）:
+
+| 対象 | ファイル数 | テスト件数 |
+|---|---|---|
+| Vitest（TypeScript） | 15 | **235** |
+| Backend（Python） | 12 | **106** |
+
+Backend のテストは 2 時間相当の連続動作テストを含み、約 8 秒で完走します。
 
 - `test_live_session.py` — レガシー webm 経路の committed/partial 契約（回帰ガード）
 - `test_live_session_pcm.py` — 窓のケイデンス・差分の正しさ・追いつき・
