@@ -25,6 +25,8 @@ export interface BridgeApi {
   openExternal(url: string): Promise<{ ok: boolean; opener?: 'chrome' | 'default'; reason?: string }>;
   writeClipboard(text: string): Promise<boolean>;
   getBackendLog(): Promise<string>;
+  /** ウィンドウの不透明度を 0.70〜1.00 で設定する（0018）。main 側で clamp される。 */
+  setWindowOpacity(value: number): Promise<{ ok: boolean; opacity: number }>;
   restartBackend(): Promise<{ ok: boolean }>;
   appendTranscriptNotice(path: string, text: string): Promise<{ ok: boolean; reason?: string }>;
   appendDiagnostics(sessionDir: string, text: string): Promise<{ ok: boolean; reason?: string }>;

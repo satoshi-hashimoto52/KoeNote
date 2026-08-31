@@ -2,10 +2,14 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
 import { existsSync, readFileSync } from 'node:fs';
 import { writeFile, mkdir, appendFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { getBackendLog, restartBackend } from '../backend';
+import { appendAppLogNotice, getBackendLog, restartBackend } from '../backend';
 import { appendDiagnosticsLine } from './diagnostics';
 import { isAllowedGptUrl, openGptUrl, openInChromeMac } from './openExternal';
 import { planSettingsMigration } from './settingsMigration';
+import {
+  normalizeWindowOpacity,
+  readWindowOpacity
+} from '../../frontend/src/components/windowOpacity';
 
 const AUDIO_FILTERS = [
   { name: '音声/動画', extensions: ['mp4', 'mov', 'm4v', 'mkv', 'avi', 'webm', 'mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'opus'] }
@@ -34,7 +38,7 @@ function readJsonFile(path: string): unknown {
  * KoeNote 側に設定がまだ無い初回起動時だけ、旧 BridgeLog の設定を引き継ぐ。
  * 失敗しても既定値で起動を続ける（旧設定は破壊しない）。
  */
-async function migrateLegacySettingsOnce(): Promise<Record<string, unknown>> {
+export async function migrateLegacySettingsOnce(): Promise<Record<string, unknown>> {
   const current = readSettings();
   const migrated = planSettingsMigration(current, readJsonFile(legacySettingsPath()));
   if (!migrated) return current;
@@ -46,7 +50,7 @@ async function migrateLegacySettingsOnce(): Promise<Record<string, unknown>> {
   }
 }
 
-function readSettings(): Record<string, unknown> {
+export function readSettings(): Record<string, unknown> {
   try {
     if (existsSync(settingsPath())) {
       return JSON.parse(readFileSync(settingsPath(), 'utf-8')) as Record<string, unknown>;
@@ -64,6 +68,31 @@ async function writeSettingsAtomic(data: Record<string, unknown>): Promise<void>
   await writeFile(tmp, JSON.stringify(data, null, 2), 'utf-8');
   const { rename } = await import('node:fs/promises');
   await rename(tmp, target);
+}
+
+/** 保存済みのウィンドウ不透明度。未設定・壊れている場合は 1.00。 */
+export function savedWindowOpacity(): number {
+  return readWindowOpacity(readSettings());
+}
+
+/**
+ * ウィンドウへ不透明度を適用する。
+ *
+ * 値は必ず normalize を通してから渡す。setOpacity を持たない環境や
+ * 失敗した場合は false を返し、呼び出し側の処理は止めない。
+ */
+export function applyWindowOpacity(win: BrowserWindow | null, value: unknown): boolean {
+  const opacity = normalizeWindowOpacity(value);
+  if (!win || win.isDestroyed()) return false;
+  // setOpacity は macOS / Windows のみ。持たない環境では何もしない。
+  if (typeof win.setOpacity !== 'function') return false;
+  try {
+    win.setOpacity(opacity);
+    return true;
+  } catch (error) {
+    appendAppLogNotice(`[window] setOpacity に失敗しました: ${String(error)}`);
+    return false;
+  }
 }
 
 export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void {
@@ -120,6 +149,13 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   });
 
   ipcMain.handle('backend:log', () => getBackendLog());
+
+  // Renderer からは number だけを受け取り、main 側でも必ず clamp してから反映する。
+  ipcMain.handle('window:setOpacity', (_evt, value: unknown) => {
+    const opacity = normalizeWindowOpacity(value);
+    const applied = applyWindowOpacity(getWindow(), opacity);
+    return { ok: applied, opacity };
+  });
 
   ipcMain.handle('backend:restart', async () => {
     const ok = await restartBackend();

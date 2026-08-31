@@ -16,8 +16,10 @@ const current: CaptureSettings = {
   gptUrl: 'https://chatgpt.com/g/g-old',
   saveFolder: '/Users/you/Documents/KoeNote',
   deviceId: 'dev-1',
+  deviceLabel: 'マイク A',
   model: 'small',
-  delayMode: 'balanced'
+  delayMode: 'balanced',
+  windowOpacity: 1
 };
 
 describe('0015: 設定モーダルの下書き', () => {
@@ -52,9 +54,10 @@ describe('0015: 設定モーダルの下書き', () => {
     expect(hasChanges(current, updateDraft(createDraft(current), 'model', 'tiny'))).toBe(true);
   });
 
-  it('保存キーは既存の 5 つのまま（形式を変えない）', () => {
+  // 0016 で deviceLabel を追加した（origin 変更で deviceId が無効になるため）。
+  it('保存キーは 7 つ（0016 deviceLabel / 0018 windowOpacity）', () => {
     expect(Object.keys(createDraft(current)).sort()).toEqual([
-      'delayMode', 'deviceId', 'gptUrl', 'model', 'saveFolder'
+      'delayMode', 'deviceId', 'deviceLabel', 'gptUrl', 'model', 'saveFolder', 'windowOpacity'
     ]);
   });
 
@@ -82,19 +85,22 @@ describe('0015: 設定モーダルの下書き', () => {
     expect(applyPickedFolder(d, '')).toBe(d);
   });
 
-  it('保存で 5 項目をまとめて反映する', () => {
+  it('保存で全項目をまとめて反映する', () => {
     let d = createDraft(current);
     d = updateDraft(d, 'gptUrl', '  https://chatgpt.com/g/g-new  ');
     d = updateDraft(d, 'saveFolder', ' /tmp/out ');
     d = updateDraft(d, 'deviceId', 'dev-2');
+    d = updateDraft(d, 'deviceLabel', 'マイク B');
     d = updateDraft(d, 'model', 'medium');
     d = updateDraft(d, 'delayMode', 'accuracy');
     expect(commitDraft(current, d, false)).toEqual({
       gptUrl: 'https://chatgpt.com/g/g-new',
       saveFolder: '/tmp/out',
       deviceId: 'dev-2',
+      deviceLabel: 'マイク B',
       model: 'medium',
-      delayMode: 'accuracy'
+      delayMode: 'accuracy',
+      windowOpacity: 1
     });
   });
 
@@ -130,8 +136,10 @@ describe('0015: 設定の検証', () => {
     gptUrl: 'https://chatgpt.com/g/g-x',
     saveFolder: '/tmp/out',
     deviceId: '',
+    deviceLabel: '',
     model: 'small',
-    delayMode: 'balanced'
+    delayMode: 'balanced',
+    windowOpacity: 1
   };
 
   it('正しい値ならエラーなし', () => {
@@ -171,5 +179,86 @@ describe('0015: 設定の検証', () => {
     const bad = { ...ok, gptUrl: 'https://evil.com/x' };
     const e = validateDraft(bad, true);
     expect(commitDraft(ok, bad, false, e)).toEqual(ok);
+  });
+});
+
+describe('0016: deviceLabel の保存', () => {
+  const base = (): CaptureSettings => ({ ...current });
+
+  it('CaptureSettings は deviceId と deviceLabel を持つ', () => {
+    const c = base();
+    expect(c).toHaveProperty('deviceId');
+    expect(c).toHaveProperty('deviceLabel');
+  });
+
+  it('保存時に deviceId と deviceLabel の両方を確定する', () => {
+    const now = { ...base(), deviceId: 'old', deviceLabel: '旧マイク' };
+    let d = createDraft(now);
+    d = updateDraft(d, 'deviceId', 'new-id');
+    d = updateDraft(d, 'deviceLabel', '新マイク');
+    const committed = commitDraft(now, d, false, {});
+    expect(committed.deviceId).toBe('new-id');
+    expect(committed.deviceLabel).toBe('新マイク');
+  });
+
+  it('deviceLabel だけが変わっても変更ありと判定する', () => {
+    const now = { ...base(), deviceId: 'x', deviceLabel: '旧' };
+    expect(hasChanges(now, { ...now, deviceLabel: '新' })).toBe(true);
+  });
+
+  it('録音中は deviceLabel も変更しない', () => {
+    const now = { ...base(), deviceId: 'x', deviceLabel: '旧' };
+    const committed = commitDraft(now, { ...now, deviceId: 'y', deviceLabel: '新' }, true, {});
+    expect(committed.deviceId).toBe('x');
+    expect(committed.deviceLabel).toBe('旧');
+  });
+});
+
+describe('0018: ウィンドウ不透明度', () => {
+  const base = (): CaptureSettings => ({ ...current });
+
+  it('保存時に windowOpacity を確定する', () => {
+    const now = base();
+    const d = updateDraft(createDraft(now), 'windowOpacity', 0.8);
+    expect(commitDraft(now, d, false, {}).windowOpacity).toBe(0.8);
+  });
+
+  it('範囲外の値は保存時に clamp される', () => {
+    const now = base();
+    expect(commitDraft(now, updateDraft(createDraft(now), 'windowOpacity', 0.5), false, {}).windowOpacity).toBe(0.7);
+    expect(commitDraft(now, updateDraft(createDraft(now), 'windowOpacity', 2), false, {}).windowOpacity).toBe(1);
+  });
+
+  it('不正値は既定 1.00 になる', () => {
+    const now = base();
+    const d = updateDraft(createDraft(now), 'windowOpacity', NaN as unknown as number);
+    expect(commitDraft(now, d, false, {}).windowOpacity).toBe(1);
+  });
+
+  it('不透明度だけが変わっても変更ありと判定する', () => {
+    const now = base();
+    expect(hasChanges(now, { ...now, windowOpacity: 0.85 })).toBe(true);
+  });
+
+  it('変更がなければ書き込ませない（同値なら false）', () => {
+    const now = base();
+    expect(hasChanges(now, { ...now })).toBe(false);
+  });
+
+  it('録音中は不透明度も変更しない', () => {
+    const now = { ...base(), windowOpacity: 1 };
+    expect(commitDraft(now, { ...now, windowOpacity: 0.7 }, true, {}).windowOpacity).toBe(1);
+  });
+
+  it('既存の項目を壊さない', () => {
+    const now = base();
+    const d = updateDraft(createDraft(now), 'windowOpacity', 0.75);
+    const c = commitDraft(now, d, false, {});
+    expect(c.gptUrl).toBe(now.gptUrl);
+    expect(c.saveFolder).toBe(now.saveFolder);
+    expect(c.deviceId).toBe(now.deviceId);
+    expect(c.deviceLabel).toBe(now.deviceLabel);
+    expect(c.model).toBe(now.model);
+    expect(c.delayMode).toBe(now.delayMode);
   });
 });

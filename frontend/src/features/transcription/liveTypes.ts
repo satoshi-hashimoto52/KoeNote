@@ -122,6 +122,8 @@ export interface StartOptions {
   chunkSeconds: number;
   overlapSeconds: number;
   deviceId?: string;
+  /** 保存時のデバイス名。deviceId が無効な場合の再解決に使う（0016）。 */
+  deviceLabel?: string;
   outputFolder: string;
   outputFilename: string;
   writeToFile: boolean;

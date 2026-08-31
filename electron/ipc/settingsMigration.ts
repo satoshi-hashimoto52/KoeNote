@@ -10,10 +10,14 @@ export const MIGRATED_KEYS = [
   'gptUrl',
   'saveFolder',
   'deviceId',
+  // 0016 で追加。旧 BridgeLog 設定には無いが、あれば引き継ぐ。
+  'deviceLabel',
   'model',
   'delayMode',
   'requestTemplate',
-  'transcriptHeight'
+  'transcriptHeight',
+  // 0018 で追加。旧 BridgeLog 設定にあれば引き継ぐ（無ければ 1.00 扱い）。
+  'windowOpacity'
 ] as const;
 
 export type MigratedKey = (typeof MIGRATED_KEYS)[number];

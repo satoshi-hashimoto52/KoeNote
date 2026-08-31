@@ -93,6 +93,14 @@ function pushImportantLog(line: string): void {
   process.stdout.write(line.endsWith('\n') ? line : `${line}\n`);
 }
 
+/**
+ * Backend 以外（Electron 側）の注意事項を、UI の診断ログへ残す。
+ * 診断ログは同じリングバッファを表示しているので、ここへ書けばユーザーから見える。
+ */
+export function appendAppLogNotice(line: string): void {
+  pushImportantLog(line.endsWith('\n') ? line : `${line}\n`);
+}
+
 export function getBackendLog(): string {
   return logBuffer.join('');
 }

@@ -12,6 +12,14 @@ import {
   updateDraft,
   validateDraft
 } from './settingsDraft';
+import { selectValueForMics } from './deviceNotice';
+import {
+  MAX_WINDOW_OPACITY,
+  MIN_WINDOW_OPACITY,
+  WINDOW_OPACITY_STEP,
+  opacityToPercent,
+  percentToOpacity
+} from './windowOpacity';
 
 interface Props {
   open: boolean;
@@ -24,6 +32,8 @@ interface Props {
   onCheckFolder: (path: string) => Promise<boolean | undefined>;
   onSave: (next: CaptureSettings) => void;
   onClose: () => void;
+  /** スライダー操作中のライブプレビュー。保存とは別に即時反映する（0018）。 */
+  onPreviewOpacity: (value: number) => void;
 }
 
 /**
@@ -38,11 +48,14 @@ export function SettingsModal({
   onPickFolder,
   onCheckFolder,
   onSave,
-  onClose
+  onClose,
+  onPreviewOpacity
 }: Props) {
   const [draft, setDraft] = useState<CaptureSettings>(() => createDraft(current));
   const [errors, setErrors] = useState<DraftErrors>({});
   const dialogRef = useRef<HTMLDivElement | null>(null);
+  // 0018: モーダルを開いた時点の不透明度。キャンセル / Escape / 背景クリックで戻す。
+  const openedOpacityRef = useRef<number>(current.windowOpacity);
   const firstFieldRef = useRef<HTMLInputElement | null>(null);
 
   // 開くたびに現在値から作り直す。前回の未保存値を持ち越さない。
@@ -50,6 +63,7 @@ export function SettingsModal({
     if (open) {
       setDraft(createDraft(current));
       setErrors({});
+      openedOpacityRef.current = current.windowOpacity;
     }
   }, [open, current]);
 
@@ -58,11 +72,12 @@ export function SettingsModal({
   }, [open]);
 
   const close = useCallback(() => {
-    // 未保存値は破棄する。
+    // 未保存値は破棄する。プレビュー中の不透明度も開いた時点へ戻す（0018）。
+    onPreviewOpacity(openedOpacityRef.current);
     setDraft(createDraft(current));
     setErrors({});
     onClose();
-  }, [current, onClose]);
+  }, [current, onClose, onPreviewOpacity]);
 
   // Escape で閉じる。フォーカスをモーダル内に留める。
   useEffect(() => {
@@ -106,10 +121,19 @@ export function SettingsModal({
     const exists = folder ? await onCheckFolder(folder).catch(() => undefined) : undefined;
     const found = validateDraft(draft, exists);
     setErrors(found);
-    if (hasErrors(found)) return;
+    if (hasErrors(found)) {
+      // 保存できないので、プレビュー中の不透明度は開いた時点へ戻す（0018）。
+      onPreviewOpacity(openedOpacityRef.current);
+      return;
+    }
     // 変更がなければ書き込まない。
     if (hasChanges(current, draft)) {
-      onSave(commitDraft(current, draft, recording, found));
+      const next = commitDraft(current, draft, recording, found);
+      onSave(next);
+      // 録音中は commitDraft が現在値を返す。プレビューもその値へ揃える。
+      onPreviewOpacity(next.windowOpacity);
+    } else {
+      onPreviewOpacity(openedOpacityRef.current);
     }
     onClose();
   }, [current, draft, onCheckFolder, onClose, onSave, recording]);
@@ -180,12 +204,18 @@ export function SettingsModal({
           <label htmlFor="set-mic">入力デバイス</label>
           <select
             id="set-mic"
-            value={draft.deviceId}
+            // 0016: 保存済み ID が一覧に無いときは空欄にせず「既定の入力デバイス」を選択状態にする。
+            value={selectValueForMics(draft.deviceId, mics)}
             disabled={recording}
             aria-label="入力デバイス"
-            onChange={(e) => setDraft((d) => updateDraft(d, 'deviceId', e.target.value))}
+            onChange={(e) => {
+              const id = e.target.value;
+              // ラベルも一緒に保存する。origin が変わって ID が無効になっても引き当て直せる。
+              const label = mics.find((m) => m.deviceId === id)?.label ?? '';
+              setDraft((d) => updateDraft(updateDraft(d, 'deviceId', id), 'deviceLabel', label));
+            }}
           >
-            <option value="">既定入力</option>
+            <option value="">既定の入力デバイス</option>
             {mics.map((m, i) => (
               <option key={m.deviceId || i} value={m.deviceId}>{m.label || `マイク ${i + 1}`}</option>
             ))}
@@ -221,6 +251,33 @@ export function SettingsModal({
             <option value="balanced">標準 (10s/2s)</option>
             <option value="accuracy">精度優先 (12s/3s)</option>
           </select>
+        </div>
+
+        {/* 0018: ラベルと現在値を 1 行に置き、スライダーは次行いっぱいに広げる。
+            320px の設定モーダルでも見切れない。 */}
+        <div className="settings-field">
+          <div className="opacity-head">
+            <label htmlFor="set-opacity">ウィンドウの不透明度</label>
+            <span className="opacity-value mono">{opacityToPercent(draft.windowOpacity)}%</span>
+          </div>
+          <input
+            id="set-opacity"
+            type="range"
+            className="opacity-range"
+            min={Math.round(MIN_WINDOW_OPACITY * 100)}
+            max={Math.round(MAX_WINDOW_OPACITY * 100)}
+            step={Math.round(WINDOW_OPACITY_STEP * 100)}
+            value={opacityToPercent(draft.windowOpacity)}
+            disabled={recording}
+            aria-label="ウィンドウの不透明度（パーセント）"
+            onChange={(e) => {
+              const next = percentToOpacity(Number(e.target.value));
+              setDraft((d) => updateDraft(d, 'windowOpacity', next));
+              // 操作中は即座にウィンドウへ反映する（保存はしない）。
+              onPreviewOpacity(next);
+            }}
+          />
+          <p className="hint">100% = 透過なし</p>
         </div>
 
         <div className="modal-actions">

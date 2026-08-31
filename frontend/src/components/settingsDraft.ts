@@ -1,10 +1,15 @@
 /**
  * 設定モーダルの下書き（0015）。
  *
- * 5 項目をひとまとまりの下書きとして扱い、「保存」を押したときだけ反映する。
+ * ひとまとまりの下書きとして扱い、「保存」を押したときだけ反映する。
  * キャンセル・Escape・背景クリックでは破棄する。
- * 保存キーと形式は既存のまま（`gptUrl` / `saveFolder` / `deviceId` / `model` / `delayMode`）。
+ * 保存キー: `gptUrl` / `saveFolder` / `deviceId` / `deviceLabel` / `model` /
+ * `delayMode` / `windowOpacity`。
+ * `deviceLabel` は 0016 で追加。origin が変わって `deviceId` が無効になっても
+ * 同じ物理デバイスを引き当て直すために使う。
  */
+
+import { normalizeWindowOpacity } from './windowOpacity';
 
 export type LiveModelValue = 'tiny' | 'base' | 'small' | 'medium';
 export type LiveDelayValue = 'low_latency' | 'balanced' | 'accuracy';
@@ -13,8 +18,12 @@ export interface CaptureSettings {
   gptUrl: string;
   saveFolder: string;
   deviceId: string;
+  /** 選択時のデバイス名。0016 で追加。旧設定には無いので空文字を許容する。 */
+  deviceLabel: string;
   model: LiveModelValue;
   delayMode: LiveDelayValue;
+  /** ウィンドウの不透明度 0.70〜1.00。0018 で追加。旧設定に無ければ 1.00。 */
+  windowOpacity: number;
 }
 
 /** マイGPT として許可する URL の接頭辞。既存の検証をそのまま使う。 */
@@ -39,8 +48,10 @@ export function hasChanges(current: CaptureSettings, draft: CaptureSettings): bo
     normalizeGptUrl(current.gptUrl) !== normalizeGptUrl(draft.gptUrl) ||
     current.saveFolder.trim() !== draft.saveFolder.trim() ||
     current.deviceId !== draft.deviceId ||
+    current.deviceLabel !== draft.deviceLabel ||
     current.model !== draft.model ||
-    current.delayMode !== draft.delayMode
+    current.delayMode !== draft.delayMode ||
+    current.windowOpacity !== draft.windowOpacity
   );
 }
 
@@ -103,7 +114,9 @@ export function commitDraft(
   return {
     ...draft,
     gptUrl: normalizeGptUrl(draft.gptUrl),
-    saveFolder: String(draft.saveFolder ?? '').trim()
+    saveFolder: String(draft.saveFolder ?? '').trim(),
+    // 不正値が設定ファイルへ入らないよう、保存時にも必ず通す。
+    windowOpacity: normalizeWindowOpacity(draft.windowOpacity)
   };
 }
 

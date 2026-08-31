@@ -5,10 +5,12 @@ const legacy = {
   gptUrl: 'https://chatgpt.com/g/g-example',
   saveFolder: '/Users/you/Documents/BridgeLog',
   deviceId: 'device-abc',
+  deviceLabel: 'マイク A',
   model: 'small',
   delayMode: 'balanced',
   requestTemplate: '要約してください',
-  transcriptHeight: 480
+  transcriptHeight: 480,
+  windowOpacity: 0.85
 };
 
 describe('planSettingsMigration', () => {
@@ -16,7 +18,25 @@ describe('planSettingsMigration', () => {
     expect(planSettingsMigration({}, legacy)).toEqual(legacy);
   });
 
-  it('移行対象の7キーをすべて引き継ぐ', () => {
+  it('windowOpacity が無い旧設定でも移行できる（0018 後方互換）', () => {
+    const { windowOpacity: _omit, ...legacyWithoutOpacity } = legacy;
+    const migrated = planSettingsMigration({}, legacyWithoutOpacity)!;
+    expect(migrated).not.toHaveProperty('windowOpacity');
+    expect(migrated.model).toBe('small');
+  });
+
+  it('windowOpacity があれば引き継ぐ（0018）', () => {
+    expect(planSettingsMigration({}, legacy)!.windowOpacity).toBe(0.85);
+  });
+
+  it('deviceLabel が無い旧 BridgeLog 設定でも移行できる（0016 後方互換）', () => {
+    const { deviceLabel: _omit, ...legacyWithoutLabel } = legacy;
+    const migrated = planSettingsMigration({}, legacyWithoutLabel)!;
+    expect(migrated).not.toHaveProperty('deviceLabel');
+    expect(migrated.deviceId).toBe('device-abc');
+  });
+
+  it('移行対象のキーをすべて引き継ぐ', () => {
     const migrated = planSettingsMigration({}, legacy)!;
     expect(Object.keys(migrated).sort()).toEqual([...MIGRATED_KEYS].sort());
   });

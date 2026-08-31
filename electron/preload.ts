@@ -19,6 +19,10 @@ const bridge = {
     ipcRenderer.invoke('shell:openExternal', url),
   writeClipboard: (text: string): Promise<boolean> => ipcRenderer.invoke('clipboard:write', text),
   getBackendLog: (): Promise<string> => ipcRenderer.invoke('backend:log'),
+
+  // ウィンドウの不透明度（0018）。number だけを渡す。値の検証と clamp は main 側で行う。
+  setWindowOpacity: (value: number): Promise<{ ok: boolean; opacity: number }> =>
+    ipcRenderer.invoke('window:setOpacity', value),
   restartBackend: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('backend:restart'),
 
   // 異常停止時に文字起こしTXTへ中断マーカーを残す。TXT はユーザーが GPT へ渡す成果物で、

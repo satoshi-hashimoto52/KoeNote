@@ -11,6 +11,22 @@
   --warn: #f59e0b;
   --error: #ef4444;
   --radius: 10px;
+
+  /* 入力欄・ボタンの見え方を 1 箇所で決める（0018）。
+     同じ用途へ個別に色を直書きしない。 */
+  --field-bg: #202024;            /* 入力背景。--card(#111113) より一段明るい濃色 */
+  --field-bg-hover: #26262b;
+  --field-border: rgba(255, 255, 255, 0.14);
+  --field-border-hover: rgba(255, 255, 255, 0.24);
+  --field-placeholder: #8b8b95;   /* 本文より弱く、かつ読める濃度 */
+  --focus-ring: rgba(124, 58, 237, 0.22);
+  /* 中立ボタン。背景へ溶けないよう入力欄よりさらに明るくする。 */
+  --btn-neutral-bg: #26262b;
+  --btn-neutral-bg-hover: #303036;
+  --btn-neutral-border: rgba(255, 255, 255, 0.18);
+  --btn-neutral-border-hover: rgba(255, 255, 255, 0.30);
+  /* 無効時。存在は分かるが有効状態と誤認しない濃度。 */
+  --disabled-opacity: 0.62;
   /* 文字起こし本文。フォームラベル(12px)と同程度に抑える（0015）。 */
   --font-transcript: 13px;
   --font-transcript-line: 1.65;
@@ -103,14 +119,15 @@ body {
 }
 .icon-btn > svg { width: 18px; height: 18px; display: block; }
 .icon-btn:hover:not(:disabled) { color: var(--fg); }
-.icon-btn:active:not(:disabled) { background: var(--input); color: var(--fg); }
+.icon-btn:hover:not(:disabled) { background: var(--field-bg); }
+.icon-btn:active:not(:disabled) { background: var(--btn-neutral-bg); color: var(--fg); }
 /* 通常時に枠を残さない。キーボード操作のときだけリングを出す。 */
 .icon-btn:focus { outline: none; }
 .icon-btn:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
-.icon-btn:disabled { opacity: 0.35; cursor: default; }
+.icon-btn:disabled { opacity: var(--disabled-opacity); cursor: default; }
 
 .brand {
   overflow: hidden;
@@ -158,6 +175,7 @@ body {
 
 /* --- Content --- */
 .content {
+  position: relative; /* .banner-floating の配置基準（0016） */
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
@@ -189,6 +207,25 @@ body {
 .banner-btn { margin-left: 12px; }
 .banner-ok { background: rgba(34, 197, 94, 0.12); border-color: rgba(34, 197, 94, 0.4); color: #86efac; }
 
+/* 8 秒で自動的に消える情報通知は、主要ボタンを画面外へ押し出さないよう浮かせて出す（0016）。
+   320x530 では 3 行のバナーが 82px を占め、開始／停止・クリア・マイGPT が隠れてしまうため。
+   ユーザー操作が必要な通知（エラー等）は従来どおり流し込みのまま残す。 */
+.banner-floating {
+  position: absolute;
+  left: 28px;
+  right: 28px;
+  top: 24px;
+  z-index: 5;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+/* 浮かせる以上、背後が透けないよう不透明にする。色みは流し込み時と同じ。 */
+.banner-floating.banner-warn {
+  background: linear-gradient(rgba(245, 158, 11, 0.12), rgba(245, 158, 11, 0.12)), var(--card);
+}
+@media (max-width: 340px) {
+  .banner-floating { left: 10px; right: 10px; top: 12px; }
+}
+
 .field {
   display: flex;
   flex-direction: column;
@@ -210,36 +247,51 @@ body {
   font-weight: 550;
 }
 
-.req {
-  margin-left: 8px;
-  font-size: 10px;
-  color: var(--accent);
-  border: 1px solid var(--accent);
-  border-radius: 4px;
-  padding: 0 5px;
-}
-
 input[type='text'],
-select {
-  background: var(--input);
-  border: 1px solid var(--border);
+select,
+textarea {
+  background: var(--field-bg);
+  border: 1px solid var(--field-border);
   color: var(--fg);
   border-radius: var(--radius);
   padding: 9px 12px;
   font-size: 14px;
   width: 100%;
   outline: none;
-  transition: border-color 0.15s;
+  transition: background-color 0.15s, border-color 0.15s, box-shadow 0.15s;
 }
 
+input[type='text']::placeholder,
+textarea::placeholder {
+  color: var(--field-placeholder);
+  opacity: 1; /* Firefox の既定減光を打ち消し、読める濃度を保つ */
+}
+
+input[type='text']:hover:not(:disabled),
+select:hover:not(:disabled),
+textarea:hover:not(:disabled) {
+  background: var(--field-bg-hover);
+  border-color: var(--field-border-hover);
+}
+
+/* クリック後に白い枠を残さない。キーボード操作のときだけリングを出す。 */
 input[type='text']:focus,
-select:focus {
+select:focus,
+textarea:focus {
   border-color: var(--accent);
+  outline: none;
+}
+input[type='text']:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 input[type='text']:disabled,
-select:disabled {
-  opacity: 0.55;
+select:disabled,
+textarea:disabled {
+  opacity: var(--disabled-opacity);
   cursor: not-allowed;
 }
 
@@ -293,8 +345,9 @@ input.invalid {
 }
 .transcript {
   position: relative;
-  background: var(--card);
-  border: 1px solid var(--border);
+  /* 0018: 入力欄と同じ地・枠にして、アプリ背景との差を明確にする。 */
+  background: var(--field-bg);
+  border: 1px solid var(--field-border);
   border-radius: var(--radius);
   width: 100%;
   min-width: 0;
@@ -366,9 +419,10 @@ input.invalid {
 
 /* --- Status bar --- */
 .statusbar {
+  position: relative; /* .infotip-body の配置基準（0017） */
   display: flex;
-  gap: 12px 18px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 8px;
   font-size: 12px;
   color: var(--muted);
   background: var(--card);
@@ -377,7 +431,132 @@ input.invalid {
   padding: 10px 14px;
   min-width: 0;
 }
-.saved-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.saved-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+/* --- 録音ステータス（0017） --- */
+
+/* 状態はこの領域で最も認識しやすくする。折り返して「録音」「中」に割れないようにする。 */
+.status-state {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.status-state .state-text {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.status-state .state-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.status-state.tone-idle .state-dot { background: var(--muted); }
+.status-state.tone-recording .state-dot { background: var(--error); animation: pulse 1.4s infinite; }
+.status-state.tone-done .state-dot { background: var(--success); }
+.status-state.tone-error .state-dot { background: var(--error); }
+.status-state.tone-reconnecting .state-dot { background: #f59e0b; animation: pulse 0.7s infinite; }
+/* 録音中だけは文字色でも判別できるようにする。 */
+.status-state.tone-recording .state-text { color: #fca5a5; }
+
+/* 時刻。広い場合は「音声 … 文字起こし …」の 4 列、狭い場合は 2 列 2 行へ落ちる。 */
+.status-times {
+  display: grid;
+  grid-template-columns: auto auto auto auto;
+  justify-content: start;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin: 0;
+  min-width: 0;
+}
+.status-times dt {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.status-times dd {
+  margin: 0;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* 横並びのときは 2 組目の前を空ける。 */
+@media (min-width: 381px) {
+  .status-times dt:nth-of-type(2) { margin-left: 14px; }
+}
+/* 狭い場合は 2 行。ラベル列が揃うので値の位置も揃う。 */
+@media (max-width: 380px) {
+  .status-times { grid-template-columns: auto minmax(0, 1fr); }
+}
+
+/* 320x530 で主要ボタンまで収める（0018）。
+   0017 で録音状態を独立行にしたぶん、狭幅では縦の余白を詰めて取り戻す。
+   文字サイズや入力欄の高さは変えない。 */
+
+
+/* 保存先は独立した行。時刻より一段下げる。 */
+.status-saved {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--muted);
+  padding-top: 2px;
+  border-top: 1px solid var(--border);
+}
+.status-saved .saved-key { flex: none; white-space: nowrap; }
+
+/* --- 小さな説明マーク（0017） --- */
+.infotip { display: inline-flex; }
+.infotip-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 1px solid var(--field-border);
+  color: var(--muted);
+  background: var(--field-bg);
+  font-size: 9px;
+  font-style: italic;
+  line-height: 1;
+  cursor: help;
+  user-select: none;
+}
+.infotip-mark:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* hover / フォーカス時だけ、カードの外側（上）へカード幅で出す。
+   本体の文字情報に被らず、狭いウィンドウでも画面外へはみ出さない。 */
+.infotip-body {
+  display: none;
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% + 6px);
+  z-index: 6;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--fg);
+  font-size: 11px;
+  line-height: 1.5;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+.infotip:hover > .infotip-body,
+.infotip:focus-within > .infotip-body {
+  display: block;
+}
 
 .level-meter {
   display: inline-flex;
@@ -388,8 +567,8 @@ input.invalid {
   display: inline-block;
   width: 90px;
   height: 8px;
-  background: var(--input);
-  border: 1px solid var(--border);
+  background: var(--field-bg);
+  border: 1px solid var(--field-border);
   border-radius: 999px;
   overflow: hidden;
 }
@@ -474,50 +653,83 @@ button {
   white-space: nowrap; /* ボタン文字を途中で折り返さない */
 }
 
+/* クリック後に白い枠を残さない。キーボード操作だけリングを出す（0018）。 */
+button:focus { outline: none; }
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
 .btn-primary,
 .btn-danger,
 .btn-accent {
-  border: none;
+  border: 1px solid transparent;
   border-radius: var(--radius);
   padding: 11px 20px;
   font-size: 14px;
   font-weight: 600;
   color: #fff;
+  transition: background-color 0.15s, border-color 0.15s;
 }
-.btn-primary { background: var(--accent); }
-.btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
-.btn-danger { background: var(--error); }
-.btn-accent { background: var(--input); border: 1px solid var(--accent); color: var(--fg); }
-.btn-accent:hover:not(:disabled) { background: rgba(124, 58, 237, 0.15); }
+.btn-primary { background: var(--accent); border-color: var(--accent); }
+.btn-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn-primary:active:not(:disabled) { background: #5b21b6; }
+.btn-danger { background: var(--error); border-color: var(--error); }
+.btn-danger:hover:not(:disabled) { background: #dc2626; border-color: #dc2626; }
+.btn-danger:active:not(:disabled) { background: #b91c1c; }
+/* マイGPT は紫アウトラインを維持しつつ、背景へ溶けないよう地を明るくする。 */
+.btn-accent { background: var(--btn-neutral-bg); border-color: var(--accent); color: var(--fg); }
+.btn-accent:hover:not(:disabled) { background: rgba(124, 58, 237, 0.22); }
+.btn-accent:active:not(:disabled) { background: rgba(124, 58, 237, 0.32); }
 
 .btn-primary:disabled,
 .btn-danger:disabled,
 .btn-accent:disabled {
-  opacity: 0.4;
+  opacity: var(--disabled-opacity);
   cursor: not-allowed;
 }
 
+/* クリアなどの中立ボタン。枠と地をアプリ背景から明確に浮かせる。 */
 .btn-ghost {
-  background: var(--input);
-  border: 1px solid var(--border);
+  background: var(--btn-neutral-bg);
+  border: 1px solid var(--btn-neutral-border);
   color: var(--fg);
   border-radius: 8px;
   padding: 7px 12px;
   font-size: 13px;
+  transition: background-color 0.15s, border-color 0.15s;
 }
-.btn-ghost:hover:not(:disabled) { border-color: var(--accent); }
-.btn-ghost:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-ghost:hover:not(:disabled) {
+  background: var(--btn-neutral-bg-hover);
+  border-color: var(--btn-neutral-border-hover);
+}
+.btn-ghost:active:not(:disabled) { background: var(--field-bg); }
+.btn-ghost:disabled { opacity: var(--disabled-opacity); cursor: not-allowed; }
 
+/* 「全文コピー」「保存TXTを開く」など。無効時もボタンの存在が分かる地を持たせる。 */
 .btn-mini {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--muted);
+  background: var(--field-bg);
+  border: 1px solid var(--field-border);
+  color: var(--fg);
   border-radius: 6px;
   padding: 3px 8px;
   font-size: 11px;
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s;
 }
-.btn-mini:hover:not(:disabled) { color: var(--fg); border-color: var(--accent); }
-.btn-mini:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-mini:hover:not(:disabled) {
+  background: var(--btn-neutral-bg);
+  border-color: var(--field-border-hover);
+}
+.btn-mini:active:not(:disabled) { background: var(--btn-neutral-bg-hover); }
+/* 無効時は枠と地を残したまま文字だけ弱める（有効状態とは明確に区別できる）。 */
+.btn-mini:disabled {
+  background: var(--card);
+  border-color: var(--border);
+  color: var(--muted);
+  opacity: var(--disabled-opacity);
+  cursor: not-allowed;
+}
 
 /* --- Modal --- */
 .modal-backdrop {
@@ -592,7 +804,8 @@ button {
   /* 入力レベルメーターの固定幅をやめ、行内で伸縮させる。 */
   .level-meter { width: 100%; }
   .level-track { width: auto; flex: 1; min-width: 40px; }
-  .statusbar { gap: 6px 10px; }
+  /* 0018: 320x530 で主要ボタンまで収めるため縦の余白を詰める。 */
+  .statusbar { gap: 5px 10px; }
 }
 
 /* 340px 以下: 文字サイズと余白を最小構成にする。 */
@@ -604,21 +817,13 @@ button {
 
 /* --- コンパクト UI（0015）--- */
 /* ラベル + 入力を 1 行に。ラベル幅は固定しすぎない。 */
-.field-row {
-  display: grid;
-  grid-template-columns: minmax(56px, auto) minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
+/* タイトル入力だけを 1 行で置く（0015）。
+   表示ラベルを持たないので、ラベル列ぶんの余白も作らない。 */
+.title-row {
+  display: block;
   min-width: 0;
 }
-.field-row > label {
-  font-size: 12px;
-  color: var(--muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.field-row > input {
+.title-row > input {
   min-width: 0;
   width: 100%;
 }
@@ -661,6 +866,31 @@ button {
 
 /* 設定モーダル。320px でも見切れない。 */
 .settings-modal { width: min(420px, calc(100vw - 24px)); padding: 18px; }
+
+/* --- ウィンドウ不透明度（0018） --- */
+.opacity-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+.opacity-head > label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.opacity-value { flex: none; color: var(--fg); font-variant-numeric: tabular-nums; }
+.opacity-range {
+  width: 100%;
+  min-width: 0;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+  background: transparent;
+  cursor: pointer;
+}
+.opacity-range:focus { outline: none; }
+.opacity-range:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.opacity-range:disabled { opacity: var(--disabled-opacity); cursor: not-allowed; }
 .settings-modal h3 { margin: 0 0 12px; }
 .settings-field {
   display: flex;
@@ -697,4 +927,15 @@ button {
     gap: 6px;
   }
   .actions-main button { width: 100%; font-size: 12px; padding-left: 6px; padding-right: 6px; }
+}
+
+/* --- 狭幅の縦詰め（0018）---
+   0017 で録音状態を独立行にしたぶん、320x530 で主要ボタンが折り返し位置より
+   下へ出てしまう。文字サイズと入力欄の高さは変えず、余白だけを詰めて取り戻す。
+   後続ブロックに上書きされないよう、意図的にファイル末尾へ置く。 */
+@media (max-width: 380px) {
+  .content { gap: 6px; padding-top: 8px; padding-bottom: 8px; }
+  .statusbar { padding: 6px 12px; }
+  .status-times { gap: 3px 8px; }
+  .field { gap: 4px; }
 }

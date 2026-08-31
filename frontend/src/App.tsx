@@ -3,7 +3,23 @@ import { TranscriptView } from './components/TranscriptView';
 import { TRANSCRIPT_HEIGHT_KEY } from './components/transcriptHeight';
 import { SettingsModal } from './components/SettingsModal';
 import { GearIcon } from './components/GearIcon';
+import { InfoTip } from './components/InfoTip';
+import {
+  DEFAULT_WINDOW_OPACITY,
+  normalizeWindowOpacity,
+  readWindowOpacity
+} from './components/windowOpacity';
 import { resolveRecordButton } from './components/recordButton';
+import { createNoticeGate } from './components/deviceNotice';
+import { createSessionCleanup } from './components/sessionCleanup';
+import {
+  createNoticeAutoDismiss,
+  errorNotice,
+  inputDeviceFallbackNotice,
+  okNotice,
+  warnNotice,
+  type UiNotice
+} from './components/uiNotice';
 import { useLiveTranscription } from './features/transcription/useLiveTranscription';
 import { primeAlertTone } from './features/transcription/alertTone';
 import {
@@ -70,15 +86,33 @@ export default function App() {
   const [starting, setStarting] = useState(false);
   const [mics, setMics] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState('');
+  // 0016: origin が変わると deviceId が無効になるため、ラベルでも引き当てられるようにする。
+  const [deviceLabel, setDeviceLabel] = useState('');
+  // 0018: ウィンドウ不透明度。CSS ではなく BrowserWindow.setOpacity で反映する。
+  const [windowOpacity, setWindowOpacity] = useState(DEFAULT_WINDOW_OPACITY);
 
   const [sessionDir, setSessionDir] = useState<string | null>(null);
   // Backend 再起動の多重実行を防ぐ（0012）。
   const restartingRef = useRef(false);
   // マイGPT の連打で複数タブを開かない（0006）。
   const openingGptRef = useRef(false);
+  // 0016: 同じデバイス通知を録音のたびに繰り返さない。
+  const noticeGateRef = useRef(createNoticeGate());
+  // 0016: 開始に失敗したセッションを status: recording のまま残さない。
+  // diagnostics は Backend の死活に依存しない Electron 側の経路を使う（0010）。
+  const cleanupSessionRef = useRef(
+    createSessionCleanup({
+      finalize: (dir, status) => finalizeSession(dir, status),
+      diagnostics: async (dir, text) => {
+        const b = getBridge();
+        if (!b) return { ok: false };
+        return b.appendDiagnostics(dir, text);
+      }
+    })
+  );
   const [transcriptPath, setTranscriptPath] = useState<string | null>(null);
   const [transcriptReady, setTranscriptReady] = useState(false);
-  const [banner, setBanner] = useState<{ tone: 'error' | 'warn' | 'ok'; text: string } | null>(null);
+  const [banner, setBanner] = useState<UiNotice | null>(null);
   // 停止押下から session_final / TXT保存完了までの確定処理中フラグ（この間はクリア禁止）。
   const [finalizing, setFinalizing] = useState(false);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
@@ -100,6 +134,10 @@ export default function App() {
       if (typeof s.gptUrl === 'string') setGptUrl(s.gptUrl);
       if (typeof s.saveFolder === 'string') setSaveFolder(s.saveFolder);
       if (typeof s.deviceId === 'string') setDeviceId(s.deviceId);
+      // 旧設定には deviceLabel が無い。無ければ空のままにする（0016）。
+      if (typeof s.deviceLabel === 'string') setDeviceLabel(s.deviceLabel);
+      // 未設定・壊れている場合は 1.00。main 側は起動時に同じ値を適用済み（0018）。
+      setWindowOpacity(readWindowOpacity(s));
       if (s.model === 'tiny' || s.model === 'base' || s.model === 'small' || s.model === 'medium') setModel(s.model);
       if (s.delayMode === 'low_latency' || s.delayMode === 'balanced' || s.delayMode === 'accuracy')
         setDelayMode(s.delayMode);
@@ -112,8 +150,57 @@ export default function App() {
 
   useEffect(() => {
     if (!bridge || !settingsLoaded) return;
-    bridge.setSettings({ gptUrl, saveFolder, deviceId, model, delayMode, requestTemplate }).catch(() => {});
-  }, [bridge, settingsLoaded, gptUrl, saveFolder, deviceId, model, delayMode, requestTemplate]);
+    bridge
+      .setSettings({
+        gptUrl, saveFolder, deviceId, deviceLabel, model, delayMode, requestTemplate, windowOpacity
+      })
+      .catch(() => {});
+  }, [
+    bridge, settingsLoaded, gptUrl, saveFolder, deviceId, deviceLabel,
+    model, delayMode, requestTemplate, windowOpacity
+  ]);
+
+  /** ウィンドウへ即時反映する（ライブプレビューと復元の共通経路）。失敗しても続行する。 */
+  const applyOpacity = useCallback(
+    (value: number) => {
+      bridge?.setWindowOpacity(normalizeWindowOpacity(value)).catch(() => {});
+    },
+    [bridge]
+  );
+
+  // 0016: 入力デバイスの解決結果を通知し、診断ログへも残す。
+  // 録音開始は妨げない（バナー表示のみ）。同じ通知は繰り返さない。
+  const { deviceResolution } = live;
+  useEffect(() => {
+    if (!deviceResolution) return;
+    if (deviceResolution.notice && noticeGateRef.current.shouldShow(deviceResolution.notice)) {
+      // 既定入力へ落ちた通知だけは録音を続けられる情報通知なので、8 秒で自動的に消す。
+      setBanner(
+        deviceResolution.matchedBy === 'default' && deviceResolution.fallbackReason
+          ? inputDeviceFallbackNotice(deviceResolution.notice)
+          : warnNotice(deviceResolution.notice)
+      );
+    }
+    // 完全な deviceId は含めない要約だけを書く。
+    if (sessionDir && bridge) {
+      bridge.appendDiagnostics(sessionDir, deviceResolution.logSummary).catch(() => {});
+    }
+  }, [deviceResolution, sessionDir, bridge]);
+
+  // 0016: フォールバック通知だけを 8 秒で自動的に消す。
+  // アンマウント時に必ず解除し、古い timer が新しい通知を消さないようにする。
+  const autoDismissRef = useRef(
+    createNoticeAutoDismiss((expired) => {
+      setBanner((cur) => (cur === expired ? null : cur));
+    })
+  );
+  useEffect(() => {
+    autoDismissRef.current.schedule(banner);
+  }, [banner]);
+  useEffect(() => {
+    const controller = autoDismissRef.current;
+    return () => controller.dispose();
+  }, []);
 
   // --- マイク一覧・録音経過・録音状態通知 ---
   const refreshMics = useCallback(async () => {
@@ -155,11 +242,11 @@ export default function App() {
     // 異常時に確実に警告音を鳴らせるよう、ユーザー操作の中で AudioContext を起こす。
     primeAlertTone();
     if (!title.trim()) {
-      setBanner({ tone: 'error', text: 'タイトルを入力してください' });
+      setBanner(errorNotice('タイトルを入力してください'));
       return;
     }
     if (!saveFolder.trim()) {
-      setBanner({ tone: 'error', text: '文字起こし保存先を指定してください' });
+      setBanner(errorNotice('文字起こし保存先を指定してください'));
       return;
     }
     // 開始処理中は「開始中…」を出し、連打を止める（0015）。
@@ -167,12 +254,12 @@ export default function App() {
     try {
       const check = await checkOutput(saveFolder);
       if (!check.exists && !check.writable) {
-        setBanner({ tone: 'error', text: '保存先が存在せず、作成もできません' });
+        setBanner(errorNotice('保存先が存在せず、作成もできません'));
         return;
       }
       // 録音音声(16kHz mono PCM)は約115MB/時。2時間ぶん + 余裕を要求する。
       if (check.free_bytes !== null && check.free_bytes < 600 * 1024 * 1024) {
-        setBanner({ tone: 'error', text: '保存先の空き容量が不足しています（録音2時間で約230MB必要）' });
+        setBanner(errorNotice('保存先の空き容量が不足しています（録音2時間で約230MB必要）'));
         return;
       }
       const session = await createSession({
@@ -184,20 +271,31 @@ export default function App() {
       setTranscriptPath(session.transcript_path);
       setTranscriptReady(false);
       setElapsedSec(0);
-      await live.start({
-        model,
-        delayMode,
-        chunkSeconds,
-        overlapSeconds,
-        deviceId: deviceId || undefined,
-        outputFolder: session.session_dir,
-        outputFilename: session.transcript_filename,
-        writeToFile: true
-      });
+      try {
+        await live.start({
+          model,
+          delayMode,
+          chunkSeconds,
+          overlapSeconds,
+          deviceId: deviceId || undefined,
+          deviceLabel: deviceLabel || undefined,
+          outputFolder: session.session_dir,
+          outputFilename: session.transcript_filename,
+          writeToFile: true
+        });
+      } catch (startError) {
+        // マイク取得・録音初期化の失敗。作成済みセッションを recording のまま残さない（0016）。
+        // 後処理は投げない設計なので、元のエラーは必ずユーザーへ届く。
+        const reason = startError instanceof Error ? startError.message : '録音開始に失敗しました';
+        await cleanupSessionRef.current(session.session_dir, reason);
+        setSessionDir(null);
+        setTranscriptPath(null);
+        throw startError;
+      }
       await refreshMics();
     } catch (error) {
       const message = error instanceof Error ? error.message : '録音開始に失敗しました';
-      setBanner({ tone: 'error', text: message });
+      setBanner(errorNotice(message));
     } finally {
       setStarting(false);
     }
@@ -211,6 +309,7 @@ export default function App() {
     chunkSeconds,
     overlapSeconds,
     deviceId,
+    deviceLabel,
     refreshMics
   ]);
 
@@ -255,7 +354,7 @@ export default function App() {
           }));
         // 失敗を握り潰さない。記録が残らなかったことを利用者に見せる。
         if (!written.ok) {
-          setBanner({ tone: 'warn', text: `diagnostics.log へ記録できませんでした（${written.reason ?? 'unknown'}）` });
+          setBanner(warnNotice(`diagnostics.log へ記録できませんでした（${written.reason ?? 'unknown'}）`));
         }
       }
     },
@@ -277,14 +376,14 @@ export default function App() {
     // 「再起動しています…」の表示が二重に走らないようにする。
     if (restartingRef.current) return;
     restartingRef.current = true;
-    setBanner({ tone: 'warn', text: 'Backend を再起動しています…' });
+    setBanner(warnNotice('Backend を再起動しています…'));
     try {
       const result = await bridge.restartBackend().catch(() => ({ ok: false }));
       if (!result.ok) {
-        setBanner({ tone: 'error', text: 'Backend の再起動に失敗しました。アプリを再起動してください。' });
+        setBanner(errorNotice('Backend の再起動に失敗しました。アプリを再起動してください。'));
         return;
       }
-      setBanner({ tone: 'ok', text: 'Backend を再起動しました。再接続します。' });
+      setBanner(okNotice('Backend を再起動しました。再接続します。'));
       live.reconnect();
     } finally {
       restartingRef.current = false;
@@ -298,7 +397,7 @@ export default function App() {
     const text = [live.committed, live.partial].filter(Boolean).join('\n');
     if (bridge) await bridge.writeClipboard(text);
     else await navigator.clipboard.writeText(text);
-    setBanner({ tone: 'ok', text: '全文をコピーしました' });
+    setBanner(okNotice('全文をコピーしました'));
   }, [bridge, live.committed, live.partial]);
 
   const openTranscript = useCallback(async () => {
@@ -312,11 +411,11 @@ export default function App() {
   const openGpt = useCallback(async () => {
     setBanner(null);
     if (!gptUrlValid) {
-      setBanner({ tone: 'error', text: '有効な chatgpt.com のURLを入力してください' });
+      setBanner(errorNotice('有効な chatgpt.com のURLを入力してください'));
       return;
     }
     if (!bridge) {
-      setBanner({ tone: 'warn', text: 'Electron 環境でのみブラウザを開けます' });
+      setBanner(warnNotice('Electron 環境でのみブラウザを開けます'));
       return;
     }
     // 連打で複数タブを開かない。
@@ -326,17 +425,17 @@ export default function App() {
       // Main プロセス側で許可ドメインを検証し、Chrome → 既定ブラウザの順に開く（0006）。
       const opened = await bridge.openExternal(gptUrl.trim());
       if (!opened.ok) {
-        setBanner({
-          tone: 'error',
-          text:
+        setBanner(
+          errorNotice(
             opened.reason === 'disallowed_domain'
               ? '許可されていない URL です（chatgpt.com のみ開けます）'
               : `ブラウザを開けませんでした（${opened.reason ?? 'unknown'}）`
-        });
+          )
+        );
         return;
       }
       if (opened.opener === 'default') {
-        setBanner({ tone: 'warn', text: 'Google Chrome が見つからないため、既定のブラウザで開きました' });
+        setBanner(warnNotice('Google Chrome が見つからないため、既定のブラウザで開きました'));
       }
     } finally {
       openingGptRef.current = false;
@@ -435,7 +534,17 @@ export default function App() {
       </header>
 
       <main className="content">
-        {banner ? <div className={`banner banner-${banner.tone}`}>{banner.text}</div> : null}
+        {banner ? (
+          <div
+            // 自動消去される通知は浮かせて出し、主要ボタンを押し出さない（0016）。
+            className={`banner banner-${banner.tone}${
+              banner.kind === 'input-device-fallback' ? ' banner-floating' : ''
+            }`}
+            role={banner.tone === 'error' ? 'alert' : 'status'}
+          >
+            {banner.message}
+          </div>
+        ) : null}
         {live.warning ? (
           <div className="banner banner-warn">
             {live.warning.message}
@@ -455,16 +564,15 @@ export default function App() {
           </div>
         ) : null}
 
-        {/* 1 行 1 項目のコンパクト表示（0015）。表示ラベルは短縮し、正式名称は aria-label / title に残す。 */}
-        <section className="field-row">
-          <label htmlFor="title" title="会議／セミナータイトル">
-            タイトル<span className="req">必須</span>
-          </label>
+        {/* 320px 幅を優先し、表示ラベルと「必須」バッジは置かない（0015）。
+            必須である旨は placeholder で示し、アクセシビリティ名は aria-label に残す。 */}
+        <section className="title-row">
           <input
             id="title"
             type="text"
-            aria-label="会議／セミナータイトル"
-            placeholder="例: AIモデルをデバイスに載せる"
+            aria-label="会議／セミナータイトル（必須）"
+            aria-required="true"
+            placeholder="タイトルを入力（必須）"
             value={title}
             disabled={recording}
             onChange={(e) => setTitle(e.target.value)}
@@ -506,14 +614,36 @@ export default function App() {
               </span>
             </span>
           </div>
-          <div className="status-line">
-            <span title={`状態: ${phaseLabel}`}>{phaseLabel}</span>
-            <span title="Backend が最後に音声を受信した時刻">音声:{formatIsoTime(live.progress.lastAudioReceivedAt)}</span>
-            <span title="最後に文字起こしが完了した時刻">文字:{formatIsoTime(live.progress.lastTranscriptionAt)}</span>
-            {live.savedPath ? (
-              <span className="saved-path ellipsis" title={`保存先: ${live.savedPath}`}>保存:{baseName(live.savedPath)}</span>
-            ) : null}
+          {/* 0017: 録音状態をこの領域で最も目立つ 1 つの表示にまとめる。
+              「録音」「中」に割れないよう nowrap。 */}
+          <div className={`status-state tone-${statusTone}`}>
+            <span className="state-dot" aria-hidden="true" />
+            <span className="state-text">{phaseLabel}</span>
           </div>
+
+          {/* 0017: 時刻はラベルを省略しない。広ければ横並び、狭ければ 2 行へ自動で切り替える。 */}
+          <dl className="status-times">
+            <dt>
+              音声
+              <InfoTip text="Backend が最後に音声を受信した時刻" />
+            </dt>
+            <dd className="mono">{formatIsoTime(live.progress.lastAudioReceivedAt)}</dd>
+            <dt>
+              文字起こし
+              <InfoTip text="最後に文字起こしが完了した時刻" />
+            </dt>
+            <dd className="mono">{formatIsoTime(live.progress.lastTranscriptionAt)}</dd>
+          </dl>
+
+          {/* 0017: 保存先は時刻と同じ行に詰め込まず、独立した行にする（優先度は一段下げる）。 */}
+          {live.savedPath ? (
+            <div className="status-saved">
+              <span className="saved-key">保存先</span>
+              <span className="saved-path ellipsis" title={live.savedPath}>
+                {baseName(live.savedPath)}
+              </span>
+            </div>
+          ) : null}
         </section>
 
         {/* 開始／停止・クリア・マイGPT を 1 行に並べる（0015）。 */}
@@ -629,7 +759,8 @@ export default function App() {
       ) : null}
       <SettingsModal
         open={settingsOpen}
-        current={{ gptUrl, saveFolder, deviceId, model, delayMode }}
+        current={{ gptUrl, saveFolder, deviceId, deviceLabel, model, delayMode, windowOpacity }}
+        onPreviewOpacity={applyOpacity}
         mics={mics}
         recording={recording}
         onPickFolder={async () => (bridge ? bridge.pickFolder() : null)}
@@ -641,7 +772,12 @@ export default function App() {
         onSave={(next) => {
           setGptUrl(next.gptUrl);
           setSaveFolder(next.saveFolder);
+          // 0016: ユーザーが保存したときだけ deviceId / deviceLabel を永続化する。
+          // フォールバックしただけでは書き換えない（USB の一時的な取り外しを恒久化しないため）。
           setDeviceId(next.deviceId);
+          setDeviceLabel(next.deviceLabel);
+          setWindowOpacity(next.windowOpacity);
+          noticeGateRef.current.reset();
           setModel(next.model);
           setDelayMode(next.delayMode);
         }}

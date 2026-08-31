@@ -8,7 +8,12 @@ import {
   BACKEND_PORT,
   type BackendExitInfo
 } from './backend';
-import { registerIpcHandlers } from './ipc/handlers';
+import {
+  applyWindowOpacity,
+  migrateLegacySettingsOnce,
+  registerIpcHandlers,
+  savedWindowOpacity
+} from './ipc/handlers';
 
 const isDev = process.env.NODE_ENV === 'development';
 let mainWindow: BrowserWindow | null = null;
@@ -56,6 +61,10 @@ function createWindow(): void {
       backgroundThrottling: false
     }
   });
+
+  // 0018: 表示前に保存済みの不透明度を当てる。
+  // show() のあとに当てると、一瞬 100% で出てから切り替わって見えるため。
+  applyWindowOpacity(mainWindow, savedWindowOpacity());
 
   mainWindow.once('ready-to-show', () => mainWindow?.show());
 
@@ -154,6 +163,9 @@ ipcMain.on('app:anomaly', (_evt, info: AnomalyInfo) => {
 
 app.whenReady().then(async () => {
   registerIpcHandlers(() => mainWindow);
+  // 旧 BridgeLog 設定の移行はウィンドウ生成より前に済ませる（0016 / 0018）。
+  // 移行された windowOpacity を初回表示から反映するため。
+  await migrateLegacySettingsOnce().catch(() => undefined);
   await startBackend(handleBackendExit);
   const healthy = await waitForBackend(60000);
   if (!healthy) {

@@ -28,6 +28,13 @@ import {
   type StartOptions
 } from './liveTypes';
 
+import {
+  FALLBACK_NOTICE,
+  acquireInputStream,
+  resolveInputDevice,
+  type ResolvedInputDevice
+} from './inputDevice';
+
 export { LIVE_PRESETS } from './liveTypes';
 export type { LiveDelayMode, LiveModel, StartOptions } from './liveTypes';
 
@@ -95,6 +102,8 @@ export interface LiveState {
   savedPath: string | null;
   audioPath: string | null;
   deviceLabel: string;
+  /** 入力デバイスをどう解決したか（0016）。開始前は null。 */
+  deviceResolution: ResolvedInputDevice | null;
   capturePath: CapturePath | null;
   logText: string;
   inputLevel: number;
@@ -125,6 +134,8 @@ export function useLiveTranscription(): LiveState {
   const [savedPath, setSavedPath] = useState<string | null>(null);
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const [deviceLabel, setDeviceLabel] = useState('-');
+  // 0016: どう解決したか（通知と診断ログに使う）。
+  const [deviceResolution, setDeviceResolution] = useState<ResolvedInputDevice | null>(null);
   const [capturePath, setCapturePath] = useState<CapturePath | null>(null);
   const [logText, setLogText] = useState('');
   const [inputLevel, setInputLevel] = useState(0);
@@ -592,23 +603,53 @@ export function useLiveTranscription(): LiveState {
       setDroppedClientSeconds(0);
       setStatus({ kind: 'connecting' });
 
+      // 保存済み deviceId は origin が変わると無効になる（0016）。
+      // 必ず現在の一覧と照合してから使う。
+      let resolved: ResolvedInputDevice;
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        resolved = resolveInputDevice(opts.deviceId ?? '', opts.deviceLabel ?? '', devices);
+      } catch {
+        // 列挙できなくても既定入力で開始を試みる。
+        resolved = {
+          ok: true,
+          effectiveDeviceId: null,
+          matchedBy: 'default',
+          fallbackReason: null,
+          notice: null,
+          logSummary: 'input_device matchedBy=default fallbackReason=enumerate_failed candidates=0'
+        };
+      }
+      if (!resolved.ok) {
+        setStatus({ kind: 'idle' });
+        setRecording(false);
+        throw new Error(resolved.notice ?? '利用できる入力デバイスがありません');
+      }
+      setDeviceResolution(resolved);
+
       let stream: MediaStream;
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            ...(opts.deviceId ? { deviceId: { exact: opts.deviceId } } : {}),
-            // BlackHole 等のループバック入力を音声強調で消さない。
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            channelCount: { ideal: 1 }
-          }
-        });
+        // 列挙後にデバイスが外れる競合に備え、最大 1 回だけ deviceId なしで取り直す。
+        const acquired = await acquireInputStream(
+          (c) => navigator.mediaDevices.getUserMedia(c),
+          resolved.effectiveDeviceId
+        );
+        stream = acquired.stream;
+        if (acquired.retried) {
+          setDeviceResolution({
+            ...resolved,
+            effectiveDeviceId: null,
+            matchedBy: 'default',
+            fallbackReason: 'device_id_not_found',
+            notice: FALLBACK_NOTICE,
+            logSummary: 'input_device matchedBy=default fallbackReason=lost_after_enumerate candidates=0'
+          });
+        }
       } catch (error) {
         setStatus({ kind: 'idle' });
         setRecording(false);
-        const message = error instanceof Error ? error.message : 'マイク権限の取得に失敗しました';
-        throw new Error(message);
+        // describeGetUserMediaError が必ず非空の文言を用意する（0016）。
+        throw error instanceof Error ? error : new Error('マイクの取得に失敗しました');
       }
       streamRef.current = stream;
       const track = stream.getAudioTracks()[0];
@@ -784,6 +825,7 @@ export function useLiveTranscription(): LiveState {
     savedPath,
     audioPath,
     deviceLabel,
+    deviceResolution,
     capturePath,
     logText,
     inputLevel,
