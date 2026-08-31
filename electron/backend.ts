@@ -3,10 +3,10 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { app } from 'electron';
 import http from 'node:http';
-import { classifyExit, createSingleFlight, type BackendExitReason } from './backend-lifecycle';
+import { classifyExit, createSingleFlight, isOwnBackendHealth, type BackendExitReason } from './backend-lifecycle';
 
 export const BACKEND_HOST = '127.0.0.1';
-export const BACKEND_PORT = Number(process.env.BRIDGELOG_PORT || 8000);
+export const BACKEND_PORT = Number(process.env.KOENOTE_PORT || 8765);
 export const BACKEND_ORIGIN = `http://${BACKEND_HOST}:${BACKEND_PORT}`;
 
 export type { BackendExitReason };
@@ -37,18 +37,28 @@ function backendDir(): string {
   return join(projectRoot(), 'backend');
 }
 
+/**
+ * パッケージ版に同梱した Backend 実行形式（PyInstaller onedir）。
+ * 存在すれば開発用 .venv やリポジトリを一切参照しない。
+ */
+function packagedBackendBinary(): string | null {
+  if (!app.isPackaged) return null;
+  const binary = join(process.resourcesPath, 'koenote-backend', 'koenote-backend');
+  return existsSync(binary) ? binary : null;
+}
+
 function resolvePython(): string {
-  // .venv があれば優先。なければ system python3。
+  // .venv があれば優先。なければ system python3。（開発時のみ使う経路）
   const venvPython = join(projectRoot(), '.venv', 'bin', 'python');
   if (existsSync(venvPython)) return venvPython;
   const backendVenv = join(backendDir(), '.venv', 'bin', 'python');
   if (existsSync(backendVenv)) return backendVenv;
-  return process.env.BRIDGELOG_PYTHON || 'python3';
+  return process.env.KOENOTE_PYTHON || 'python3';
 }
 
 // GUI から起動した Electron は PATH が最小構成になり Homebrew の ffmpeg/ffprobe を
 // 見つけられないことがある。子 Backend が必ず ffmpeg を解決できるよう PATH を補い、
-// 見つかれば BRIDGELOG_FFMPEG_DIR も設定する（realtime のデコード失敗＝空文字化を防ぐ）。
+// 見つかれば KOENOTE_FFMPEG_DIR も設定する（realtime のデコード失敗＝空文字化を防ぐ）。
 const FFMPEG_CANDIDATE_DIRS = ['/opt/homebrew/bin', '/usr/local/bin'];
 
 function detectFfmpegDir(): string | null {
@@ -64,10 +74,10 @@ function buildBackendEnv(): NodeJS.ProcessEnv {
   const merged = [...FFMPEG_CANDIDATE_DIRS, '/usr/bin', '/bin', '/usr/sbin', '/sbin', ...existing];
   env.PATH = Array.from(new Set(merged)).join(':');
   const ffmpegDir = detectFfmpegDir();
-  if (ffmpegDir && !env.BRIDGELOG_FFMPEG_DIR) {
-    env.BRIDGELOG_FFMPEG_DIR = ffmpegDir;
+  if (ffmpegDir && !env.KOENOTE_FFMPEG_DIR) {
+    env.KOENOTE_FFMPEG_DIR = ffmpegDir;
   }
-  pushLog(`[backend] PATH=${env.PATH}\n[backend] ffmpeg_dir=${env.BRIDGELOG_FFMPEG_DIR || '(PATH解決)'}\n`);
+  pushLog(`[backend] PATH=${env.PATH}\n[backend] ffmpeg_dir=${env.KOENOTE_FFMPEG_DIR || '(PATH解決)'}\n`);
   return env;
 }
 
@@ -98,8 +108,15 @@ export function isBackendRunning(): boolean {
 function healthCheckOnce(): Promise<boolean> {
   return new Promise((resolve) => {
     const req = http.get(`${BACKEND_ORIGIN}/api/health`, { timeout: 1500 }, (res) => {
-      res.resume();
-      resolve(res.statusCode === 200);
+      // status だけでなく名乗るアプリ名まで確認する。
+      // 同じポートを別プロジェクトが握っていた場合に掴んでしまうため。
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk: string) => {
+        if (body.length < 4096) body += chunk;
+      });
+      res.on('end', () => resolve(isOwnBackendHealth(res.statusCode, body)));
+      res.on('error', () => resolve(false));
     });
     req.on('error', () => resolve(false));
     req.on('timeout', () => {
@@ -129,15 +146,18 @@ export async function startBackend(onExit?: (info: BackendExitInfo) => void): Pr
   }
   if (backendProcess) return;
 
-  const python = resolvePython();
-  const cwd = backendDir();
-  pushImportantLog(`[backend] 起動: ${python} -m uvicorn main:app (cwd=${cwd})\n`);
+  // パッケージ版は同梱の実行形式、開発版は .venv の python を使う。
+  const packaged = packagedBackendBinary();
+  const command = packaged ?? resolvePython();
+  const leadingArgs = packaged ? [] : ['-m', 'uvicorn', 'main:app'];
+  const cwd = packaged ? join(process.resourcesPath, 'koenote-backend') : backendDir();
+  pushImportantLog(
+    `[backend] 起動: ${command} ${leadingArgs.join(' ')} (cwd=${cwd}, packaged=${Boolean(packaged)})\n`
+  );
   backendProcess = spawn(
-    python,
+    command,
     [
-      '-m',
-      'uvicorn',
-      'main:app',
+      ...leadingArgs,
       '--host',
       BACKEND_HOST,
       '--port',

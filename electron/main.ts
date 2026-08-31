@@ -16,7 +16,7 @@ let isRecording = false;
 let quitting = false;
 let powerSaveBlockerId: number | null = null;
 
-process.env.BRIDGELOG_PORT = String(BACKEND_PORT);
+process.env.KOENOTE_PORT = String(BACKEND_PORT);
 
 // 長時間録音中に Chromium がタイマーを間引く/レンダラを背面化するのを止める。
 // webPreferences.backgroundThrottling:false だけではオクルージョン起因の背面化を塞げない。
@@ -45,7 +45,7 @@ function createWindow(): void {
     minHeight: 480,
     backgroundColor: '#09090B',
     titleBarStyle: 'hiddenInset',
-    title: 'BridgeLog',
+    title: 'KoeNote',
     show: false,
     webPreferences: {
       preload: join(__dirname, 'preload.cjs'),
@@ -127,7 +127,7 @@ function handleBackendExit(info: BackendExitInfo): void {
       ? 'Backend がメモリ不足で強制終了した可能性があります'
       : 'Backend が異常終了しました';
   alertUser(
-    'BridgeLog: 文字起こしが中断されました',
+    'KoeNote: 文字起こしが中断されました',
     `${label}\n(code=${info.code} signal=${info.signal})\n\n確定済みの文字起こしと録音音声は保存されています。`,
     ['OK', 'Backendを再起動']
   ).then((response) => {
@@ -146,7 +146,7 @@ ipcMain.on('app:recordingState', (_evt, recording: boolean) => {
 // renderer 側のウォッチドッグが検知した異常（Backend は生きているが進まない等）。
 ipcMain.on('app:anomaly', (_evt, info: AnomalyInfo) => {
   alertUser(
-    'BridgeLog: 文字起こしが停止しました',
+    'KoeNote: 文字起こしが停止しました',
     `${info.detail}\n\n確定済みの文字起こしと録音音声は保存されています。`,
     ['OK']
   );

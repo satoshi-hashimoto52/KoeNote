@@ -28,7 +28,7 @@ def tone(samples: int) -> bytes:
 
 class CrashSafeWavWriterTest(unittest.TestCase):
     def setUp(self):
-        self.dir = Path(tempfile.mkdtemp(prefix="bridgelog_wavtest_"))
+        self.dir = Path(tempfile.mkdtemp(prefix="koenote_wavtest_"))
         self.path = self.dir / "recording.wav"
 
     def test_closed_file_is_readable_with_expected_frames(self):
@@ -91,7 +91,7 @@ class CrashSafeWavWriterTest(unittest.TestCase):
 
 class AsyncWavAppenderTest(unittest.TestCase):
     def setUp(self):
-        self.dir = Path(tempfile.mkdtemp(prefix="bridgelog_wavasync_"))
+        self.dir = Path(tempfile.mkdtemp(prefix="koenote_wavasync_"))
         self.path = self.dir / "recording.wav"
 
     def test_frames_reach_disk_and_memory_stays_bounded(self):

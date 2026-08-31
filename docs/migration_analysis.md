@@ -1,5 +1,8 @@
 # BridgeLog 移植調査 (Phase 1)
 
+> **注記**: 本アプリはこの記録の作成後に **BridgeLog** から **KoeNote** へ改称しました。
+> 以下の本文は当時の記録として、旧名称・旧パスのまま維持しています。
+
 MyLauncher の Whisper 文字起こし機能を BridgeLog へ移植するための調査結果。
 
 調査対象: `/Users/hashimoto/vscode/_app/my_launcher/launcher/apps/whisper`（および `backend/`, `tests/`）

@@ -14,7 +14,7 @@ import {
 
 const current: CaptureSettings = {
   gptUrl: 'https://chatgpt.com/g/g-old',
-  saveFolder: '/Users/you/Documents/BridgeLog',
+  saveFolder: '/Users/you/Documents/KoeNote',
   deviceId: 'dev-1',
   model: 'small',
   delayMode: 'balanced'
@@ -61,7 +61,7 @@ describe('0015: 設定モーダルの下書き', () => {
   it('既存の gptUrl と saveFolder を読み込む', () => {
     const d = createDraft(current);
     expect(d.gptUrl).toBe('https://chatgpt.com/g/g-old');
-    expect(d.saveFolder).toBe('/Users/you/Documents/BridgeLog');
+    expect(d.saveFolder).toBe('/Users/you/Documents/KoeNote');
   });
 
   it('URL を編集しただけでは元設定を変えない', () => {
@@ -73,7 +73,7 @@ describe('0015: 設定モーダルの下書き', () => {
   it('保存先を選択しただけでは元設定を変えない', () => {
     const d = applyPickedFolder(createDraft(current), '/tmp/new');
     expect(d.saveFolder).toBe('/tmp/new');
-    expect(current.saveFolder).toBe('/Users/you/Documents/BridgeLog');
+    expect(current.saveFolder).toBe('/Users/you/Documents/KoeNote');
   });
 
   it('フォルダ選択をキャンセルしたら下書きを変えない', () => {

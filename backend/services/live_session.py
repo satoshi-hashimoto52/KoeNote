@@ -819,7 +819,7 @@ class LiveSession:
                 "debug_wav_path": None,
             }
 
-        with tempfile.TemporaryDirectory(prefix="bridgelog_live_tail_") as tmp:
+        with tempfile.TemporaryDirectory(prefix="koenote_live_tail_") as tmp:
             source_wav = Path(tmp) / "joined.wav"
             tail_wav = Path(tmp) / "tail.wav"
             source_wav.write_bytes(wav_result["wav_bytes"])
@@ -1021,7 +1021,7 @@ class LiveSession:
         if output_folder:
             folder = Path(output_folder).expanduser()
         else:
-            folder = Path.home() / "Desktop" / f"bridgelog_live_{datetime.now().strftime('%Y%m%d')}"
+            folder = Path.home() / "Desktop" / f"koenote_live_{datetime.now().strftime('%Y%m%d')}"
         folder.mkdir(parents=True, exist_ok=True)
         filename = self.config.output_filename or f"meeting_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         return str(folder / filename)

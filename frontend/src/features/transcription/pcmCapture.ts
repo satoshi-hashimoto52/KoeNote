@@ -47,7 +47,7 @@ export interface StartCaptureOptions {
 // パッケージ版は file:// で動くため、アセットパス方式では module fetch が CORS で弾かれる。
 // blob: はドキュメント origin を継承するので dev と packaged で同一の経路になる。
 const WORKLET_SOURCE = `
-class BridgelogPcmCapture extends AudioWorkletProcessor {
+class KoeNotePcmCapture extends AudioWorkletProcessor {
   constructor() {
     super();
     this.buffer = new Int16Array(${FRAME_SAMPLES});
@@ -77,7 +77,7 @@ class BridgelogPcmCapture extends AudioWorkletProcessor {
     return true;
   }
 }
-registerProcessor('bridgelog-pcm-capture', BridgelogPcmCapture);
+registerProcessor('koenote-pcm-capture', KoeNotePcmCapture);
 `;
 
 function floatToPcm16(input: Float32Array): Int16Array<ArrayBuffer> {
@@ -125,7 +125,7 @@ export async function startPcmCapture(options: StartCaptureOptions): Promise<Pcm
   try {
     blobUrl = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: 'text/javascript' }));
     await ctx.audioWorklet.addModule(blobUrl);
-    const worklet = new AudioWorkletNode(ctx, 'bridgelog-pcm-capture');
+    const worklet = new AudioWorkletNode(ctx, 'koenote-pcm-capture');
     worklet.port.onmessage = (event: MessageEvent<PcmFrame>) => {
       if (stopped) return;
       totalSamples = event.data.totalSamples;

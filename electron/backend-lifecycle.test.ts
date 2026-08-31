@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyExit, createSingleFlight } from './backend-lifecycle';
+import { classifyExit, createSingleFlight, isOwnBackendHealth } from './backend-lifecycle';
 
 /** 解決タイミングを手で制御できる Promise。 */
 function deferred<T>() {
@@ -119,5 +119,24 @@ describe('createSingleFlight（0012 の再起動排他）', () => {
     gate.resolve(true);
     await running;
     expect(guard.isRunning()).toBe(false);
+  });
+});
+
+describe('isOwnBackendHealth', () => {
+  it('KoeNote 自身のBackendは再利用できる', () => {
+    expect(isOwnBackendHealth(200, '{"status":"ok","app":"KoeNote","ffmpeg_ok":true}')).toBe(true);
+  });
+
+  it('別プロジェクトが同じポートを占有していても再利用しない', () => {
+    // 実際に発生した事象: 別アプリが 8000 番で {"status":"ok"} を返し、
+    // パッケージ版 KoeNote がそれを自分のBackendとして掴んでしまった。
+    expect(isOwnBackendHealth(200, '{"status":"ok"}')).toBe(false);
+    expect(isOwnBackendHealth(200, '{"status":"ok","app":"my_launcher"}')).toBe(false);
+  });
+
+  it('200 以外・壊れた本文は再利用しない', () => {
+    expect(isOwnBackendHealth(503, '{"status":"ok","app":"KoeNote"}')).toBe(false);
+    expect(isOwnBackendHealth(200, 'not json')).toBe(false);
+    expect(isOwnBackendHealth(undefined, '{"app":"KoeNote"}')).toBe(false);
   });
 });

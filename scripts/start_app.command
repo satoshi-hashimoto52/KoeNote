@@ -1,5 +1,5 @@
 #!/bin/bash
-# BridgeLog を開発モードで起動する（Vite + Electron。Backend は Electron が自動起動）。
+# KoeNote を開発モードで起動する（Vite + Electron。Backend は Electron が自動起動）。
 set -e
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_DIR"

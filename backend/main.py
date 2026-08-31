@@ -1,6 +1,6 @@
-"""BridgeLog Backend (FastAPI).
+"""KoeNote Backend (FastAPI).
 
-Electron から子プロセスとして起動される想定。127.0.0.1:8000 で待ち受ける。
+Electron から子プロセスとして起動される想定。127.0.0.1:8765 で待ち受ける（既定値。Electron から --port で指定される）。
 MyLauncher 固有のルーター（my_tool / sevenseg）や CLI 実行・HTML 配信は移植しない。
 """
 import sys
@@ -18,7 +18,7 @@ from routes.whisper import live_router as whisper_live_router
 from routes.whisper import router as whisper_router
 from routes.session import router as session_router
 
-app = FastAPI(title="BridgeLog API")
+app = FastAPI(title="KoeNote API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -49,7 +49,7 @@ def health():
         ffprobe = shutil.which("ffprobe")
     return {
         "status": "ok",
-        "app": "BridgeLog",
+        "app": "KoeNote",
         "ffmpeg": ffmpeg,
         "ffprobe": ffprobe,
         "ffmpeg_ok": bool(ffmpeg and ffprobe),

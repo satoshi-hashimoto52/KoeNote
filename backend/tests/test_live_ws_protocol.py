@@ -218,7 +218,7 @@ class LiveWsProtocolTest(unittest.TestCase):
         self.assertGreaterEqual(heartbeat["dropped_seconds"], 3.0)
 
     def test_reconnect_resumes_the_same_session_and_transcript(self):
-        outdir = Path(tempfile.mkdtemp(prefix="bridgelog_ws_resume_"))
+        outdir = Path(tempfile.mkdtemp(prefix="koenote_ws_resume_"))
         config = base_config(write_to_file=True, output_folder=str(outdir), output_filename="transcript.txt")
         with patch("services.live_session.transcribe_pcm16", return_value=stub_result(text="前半", end=1.0)):
             with self.TestClient(self.app) as client:

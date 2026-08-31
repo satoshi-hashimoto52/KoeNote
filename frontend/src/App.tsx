@@ -414,7 +414,7 @@ export default function App() {
         <div className="titlebar-lead" aria-hidden="true" />
         {/* 中央: タイトル。省略しない。 */}
         <div className="titlebar-center">
-          <span className="brand">BridgeLog</span>
+          <span className="brand">KoeNote</span>
         </div>
         <div className="titlebar-trail">
           {/* 狭幅では CSS で隠す。録音進捗パネルに同じ情報がある。 */}

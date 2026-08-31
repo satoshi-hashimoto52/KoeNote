@@ -15,5 +15,14 @@ backend/.venv/
 .DS_Store
 *.log
 
-# BridgeLog runtime artifacts
+# KoeNote runtime artifacts
 diagnostics.log
+
+# パッケージング成果物
+backend/packaging/build/
+backend/packaging/dist/
+
+# 配布成果物（release/ 配下以外に置かれた場合の保険）
+*.app
+*.dmg
+*.zip

@@ -5,13 +5,45 @@ import { dirname, join } from 'node:path';
 import { getBackendLog, restartBackend } from '../backend';
 import { appendDiagnosticsLine } from './diagnostics';
 import { isAllowedGptUrl, openGptUrl, openInChromeMac } from './openExternal';
+import { planSettingsMigration } from './settingsMigration';
 
 const AUDIO_FILTERS = [
   { name: '音声/動画', extensions: ['mp4', 'mov', 'm4v', 'mkv', 'avi', 'webm', 'mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'opus'] }
 ];
 
 function settingsPath(): string {
-  return join(app.getPath('userData'), 'bridgelog-settings.json');
+  return join(app.getPath('userData'), 'koenote-settings.json');
+}
+
+/** 旧 BridgeLog の設定ファイル。読むだけで、書き換えも削除もしない。 */
+function legacySettingsPath(): string {
+  return join(app.getPath('appData'), 'BridgeLog', 'bridgelog-settings.json');
+}
+
+function readJsonFile(path: string): unknown {
+  try {
+    if (!existsSync(path)) return null;
+    return JSON.parse(readFileSync(path, 'utf-8')) as unknown;
+  } catch {
+    // 壊れていても移行を諦めるだけ。旧ファイルには一切触れない。
+    return null;
+  }
+}
+
+/**
+ * KoeNote 側に設定がまだ無い初回起動時だけ、旧 BridgeLog の設定を引き継ぐ。
+ * 失敗しても既定値で起動を続ける（旧設定は破壊しない）。
+ */
+async function migrateLegacySettingsOnce(): Promise<Record<string, unknown>> {
+  const current = readSettings();
+  const migrated = planSettingsMigration(current, readJsonFile(legacySettingsPath()));
+  if (!migrated) return current;
+  try {
+    await writeSettingsAtomic(migrated);
+    return migrated;
+  } catch {
+    return current;
+  }
 }
 
 function readSettings(): Record<string, unknown> {
@@ -35,7 +67,7 @@ async function writeSettingsAtomic(data: Record<string, unknown>): Promise<void>
 }
 
 export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void {
-  ipcMain.handle('settings:get', () => readSettings());
+  ipcMain.handle('settings:get', () => migrateLegacySettingsOnce());
 
   ipcMain.handle('settings:set', async (_evt, data: Record<string, unknown>) => {
     const merged = { ...readSettings(), ...(data || {}) };

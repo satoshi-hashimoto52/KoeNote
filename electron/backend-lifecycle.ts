@@ -58,3 +58,23 @@ export function createSingleFlight<T>(): SingleFlight<T> {
     }
   };
 }
+
+/** KoeNote の /api/health が名乗るアプリ名。 */
+export const BACKEND_APP_NAME = 'KoeNote';
+
+/**
+ * /api/health の応答が「KoeNote 自身のBackend」かどうかを判定する。
+ *
+ * 同じポートを別プロジェクトが占有していることは実際に起きる。status だけを見ると
+ * 無関係のサーバへ録音を送ってしまうため、app 名まで一致した場合だけ再利用する。
+ */
+export function isOwnBackendHealth(statusCode: number | undefined, body: string): boolean {
+  if (statusCode !== 200) return false;
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (typeof parsed !== 'object' || parsed === null) return false;
+    return (parsed as { app?: unknown }).app === BACKEND_APP_NAME;
+  } catch {
+    return false;
+  }
+}

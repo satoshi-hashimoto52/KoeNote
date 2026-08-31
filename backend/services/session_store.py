@@ -1,4 +1,4 @@
-"""BridgeLog の会議セッション（フォルダ・メタデータ）管理。
+"""KoeNote の会議セッション（フォルダ・メタデータ）管理。
 
 会議ごとに専用ディレクトリ `YYYYMMDD_<safe_title>/` を作り、
 session.json を原子的に書き込む。
@@ -97,7 +97,7 @@ def create_meeting_directory(
             candidate_name = f"{date_prefix}_{safe_title}_{suffix:02}"
 
     session = {
-        "app": "BridgeLog",
+        "app": "KoeNote",
         "title": title,  # 元のタイトル文字列を保持
         "safe_title": safe_title,
         "gpt_url": gpt_url,

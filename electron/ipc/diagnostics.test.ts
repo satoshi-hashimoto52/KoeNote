@@ -7,7 +7,7 @@ import { appendDiagnosticsLine, formatDiagnosticsLine, localIsoSeconds } from '.
 let base: string;
 
 beforeEach(async () => {
-  base = await mkdtemp(join(tmpdir(), 'bridgelog-diag-'));
+  base = await mkdtemp(join(tmpdir(), 'koenote-diag-'));
 });
 
 afterEach(async () => {

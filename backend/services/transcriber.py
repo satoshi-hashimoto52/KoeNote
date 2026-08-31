@@ -12,10 +12,10 @@ from typing import Optional
 from .exporter import create_output_directory, export_transcription_files
 from .file_utils import write_text_file
 
-MODEL_ENV = "BRIDGELOG_MODEL_PATH"
-MODEL_NAME_ENV = "BRIDGELOG_MODEL_NAME"
-PYTHON_ENV = "BRIDGELOG_PYTHON"
-FFMPEG_DIR_ENV = "BRIDGELOG_FFMPEG_DIR"
+MODEL_ENV = "KOENOTE_MODEL_PATH"
+MODEL_NAME_ENV = "KOENOTE_MODEL_NAME"
+PYTHON_ENV = "KOENOTE_PYTHON"
+FFMPEG_DIR_ENV = "KOENOTE_FFMPEG_DIR"
 DEFAULT_MODEL_NAME = "small"
 SEGMENT_DURATION_SECONDS = 10 * 60
 MAX_WHISPER_WORKER_RSS_BYTES = 6 * 1024 * 1024 * 1024
@@ -102,6 +102,14 @@ def resolve_python() -> str:
     env_path = os.environ.get(PYTHON_ENV, "").strip()
     if env_path and Path(env_path).is_file():
         return env_path
+    if getattr(sys, "frozen", False):
+        # PyInstaller で固めたパッケージ版では sys.executable は Python ではなく
+        # Backend 実行形式そのもの。これを Python として起動すると runner.py ではなく
+        # uvicorn がもう一度立ち上がる。黙って誤動作させず、ここで明示的に失敗させる。
+        raise RuntimeError(
+            "パッケージ版ではファイル一括文字起こしを利用できません。"
+            f"別途 Python を用意し、環境変数 {PYTHON_ENV} でそのパスを指定してください。"
+        )
     if sys.executable and Path(sys.executable).is_file():
         return sys.executable
     return "python3"
@@ -110,7 +118,7 @@ def resolve_python() -> str:
 def resolve_ffmpeg_dir() -> Optional[Path]:
     """ffmpeg/ffprobe を含むディレクトリを返す。
 
-    優先順位: 環境変数 BRIDGELOG_FFMPEG_DIR > 同梱 resources/ffmpeg/bin > None(=システムPATH)。
+    優先順位: 環境変数 KOENOTE_FFMPEG_DIR > 同梱 resources/ffmpeg/bin > None(=システムPATH)。
     MyLauncher のような絶対パスは持たない。
     """
     env_dir = os.environ.get(FFMPEG_DIR_ENV, "").strip()
@@ -210,7 +218,7 @@ def _run_segmented_transcribe(
             f"disk_space: 長時間音声処理に必要な空き容量が不足しています。"
             f"必要見込み={required_bytes} bytes input_free={input_free} bytes temp_free={temp_free} bytes"
         )
-    job_directory = Path(tempfile.gettempdir()) / "bridgelog_jobs" / (job_id or os.urandom(8).hex())
+    job_directory = Path(tempfile.gettempdir()) / "koenote_jobs" / (job_id or os.urandom(8).hex())
     job_directory.mkdir(parents=True, exist_ok=True)
     progress_path = job_directory / "progress.json"
     total_segments = max(1, math.ceil(duration / SEGMENT_DURATION_SECONDS))
@@ -417,7 +425,7 @@ def run_transcribe(
 
     if not output_folder and cleanup and write_to_file:
         today_str = __import__("datetime").datetime.today().strftime("%Y%m%d")
-        output_folder = os.path.expanduser(f"~/Desktop/bridgelog_output_{today_str}")
+        output_folder = os.path.expanduser(f"~/Desktop/koenote_output_{today_str}")
 
     cmd = [
         python_bin,
@@ -540,7 +548,7 @@ def run_transcribe(
 
 
 def save_upload_file(upload) -> str:
-    temp_root = Path(tempfile.gettempdir()) / "bridgelog_whisper"
+    temp_root = Path(tempfile.gettempdir()) / "koenote_whisper"
     temp_root.mkdir(parents=True, exist_ok=True)
     filename = Path(getattr(upload, "filename", "") or "upload").name
     target = temp_root / f"{os.urandom(8).hex()}_{filename}"

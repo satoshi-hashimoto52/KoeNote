@@ -2,8 +2,8 @@ import { contextBridge, ipcRenderer } from 'electron';
 
 // Renderer から Node API は使わせず、必要最小限の IPC だけを公開する。
 const bridge = {
-  backendOrigin: `http://127.0.0.1:${process.env.BRIDGELOG_PORT || 8000}`,
-  wsOrigin: `ws://127.0.0.1:${process.env.BRIDGELOG_PORT || 8000}`,
+  backendOrigin: `http://127.0.0.1:${process.env.KOENOTE_PORT || 8765}`,
+  wsOrigin: `ws://127.0.0.1:${process.env.KOENOTE_PORT || 8765}`,
 
   getSettings: (): Promise<Record<string, unknown>> => ipcRenderer.invoke('settings:get'),
   setSettings: (data: Record<string, unknown>): Promise<Record<string, unknown>> =>

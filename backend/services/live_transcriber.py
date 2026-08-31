@@ -152,7 +152,7 @@ def _is_hallucination_text(text: str) -> bool:
 
 
 def _debug_chunk_dir() -> Path:
-    path = Path(tempfile.gettempdir()) / f"bridgelog_live_debug_{datetime.now().strftime('%Y%m%d')}"
+    path = Path(tempfile.gettempdir()) / f"koenote_live_debug_{datetime.now().strftime('%Y%m%d')}"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -295,7 +295,7 @@ def transcribe_audio_chunk(audio_bytes: bytes, mime_type: str, model_name: str, 
     model_key = (model_name or DEFAULT_MODEL).strip().lower()
     suffix = ".mp4" if "mp4" in (mime_type or "") else ".webm"
 
-    with tempfile.TemporaryDirectory(prefix="bridgelog_live_chunk_") as tmp:
+    with tempfile.TemporaryDirectory(prefix="koenote_live_chunk_") as tmp:
         input_path = Path(tmp) / f"chunk{suffix}"
         wav_path = Path(tmp) / "chunk.wav"
         input_path.write_bytes(audio_bytes)
@@ -332,7 +332,7 @@ def transcribe_wav_file(wav_path: Path, model_name: str, debug_save: bool = Fals
 def convert_webm_bytes_to_wav(audio_bytes: bytes, mime_type: str, debug_save: bool = False) -> dict:
     suffix = ".mp4" if "mp4" in (mime_type or "") else ".webm"
 
-    with tempfile.TemporaryDirectory(prefix="bridgelog_live_joined_") as tmp:
+    with tempfile.TemporaryDirectory(prefix="koenote_live_joined_") as tmp:
         input_path = Path(tmp) / f"joined{suffix}"
         wav_path = Path(tmp) / "joined.wav"
         input_path.write_bytes(audio_bytes)

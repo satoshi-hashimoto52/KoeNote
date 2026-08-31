@@ -1,7 +1,7 @@
 import type { BridgeApi } from '../types/bridge';
 
-const FALLBACK_ORIGIN = 'http://127.0.0.1:8000';
-const FALLBACK_WS = 'ws://127.0.0.1:8000';
+const FALLBACK_ORIGIN = 'http://127.0.0.1:8765';
+const FALLBACK_WS = 'ws://127.0.0.1:8765';
 
 export function getBridge(): BridgeApi | null {
   return typeof window !== 'undefined' && window.bridge ? window.bridge : null;

@@ -1,4 +1,4 @@
-# BridgeLog
+# KoeNote
 
 会議・セミナーの**長時間文字起こし**を行い、事前登録したタイトル・マイGPT URL とともに、
 文字起こし完了後に**マイGPT（ChatGPT の GPTs）へ渡す準備**を整える macOS 向け Electron デスクトップアプリ。
@@ -9,12 +9,25 @@
 > Whisper 文字起こし機能は既存プロジェクト `my_launcher` から移植しました。
 > 調査・移植の詳細は [`docs/migration_analysis.md`](docs/migration_analysis.md) を参照してください。
 
+> 本アプリは以前 **BridgeLog** という名称でした。`docs/` 配下の受け入れ試験記録や Issue には
+> 当時の名称が残っていますが、当時の記録として意図的に維持しています。
+
+### 設定の保存先
+
+`~/Library/Application Support/KoeNote/koenote-settings.json`
+
+旧 BridgeLog を使っていた場合、KoeNote 側にまだ設定が無い初回起動時に限り、
+`~/Library/Application Support/BridgeLog/bridgelog-settings.json` から
+`gptUrl` / `saveFolder` / `deviceId` / `model` / `delayMode` / `requestTemplate` /
+`transcriptHeight` を引き継ぎます。旧設定は読み取るだけで、変更も削除もしません。
+KoeNote 側に既に設定がある場合は移行しません。
+
 ---
 
 ## 構成
 
 ```
-BridgeLog/
+KoeNote/
 ├── electron/          # Electron main / preload / IPC（TypeScript, esbuild でビルド）
 │   ├── main.ts        #   ウィンドウ・Backend ライフサイクル・終了確認
 │   ├── preload.ts     #   contextBridge で window.bridge を最小公開
@@ -49,12 +62,12 @@ BridgeLog/
 - Python 3.x
 - **ffmpeg / ffprobe**（`brew install ffmpeg`）— 音声ファイルからの文字起こしに使用します
   （リアルタイム文字起こしは ffmpeg を使いません）
-  （環境変数 `BRIDGELOG_FFMPEG_DIR` で同梱ディレクトリを指定することも可能）
+  （環境変数 `KOENOTE_FFMPEG_DIR` で同梱ディレクトリを指定することも可能）
 
 ## セットアップ
 
 ```bash
-cd /Users/hashimoto/vscode/_app/BridgeLog
+cd KoeNote   # クローンしたディレクトリ
 
 # 1) Node 依存
 npm install
@@ -109,6 +122,8 @@ npm run dev
 |---|---|
 | `npm run dev` | 開発起動（Vite + Electron + Backend 自動起動） |
 | `npm run build` | 型チェック → Electron ビルド → Renderer ビルド |
+| `npm run package:backend` | Backend を PyInstaller で単体実行形式へ固める |
+| `npm run package:mac` | Backend 同梱の `.app` と `.dmg` を `release/` へ作成 |
 | `npm run dist` | `electron-builder` で macOS 向け配布物（dmg）を作成 |
 | `npm run typecheck` | TypeScript 型チェック |
 | `npm run test:backend` | Backend の Python ユニットテスト |
@@ -269,7 +284,7 @@ npm run test:backend
 ```bash
 # Backend を起動しておく（npm run dev でもよい）
 .venv/bin/python scripts/live_soak.py --minutes 120 --speed 90 \
-  --output-folder /tmp/bridgelog_soak
+  --output-folder /tmp/koenote_soak
 ```
 
 実 WebSocket で合成 PCM を流し、Backend の RSS 傾き・heartbeat 断・破棄音声・
@@ -282,15 +297,60 @@ npm run test:backend
 - `scripts/pcm_pipeline_check.cjs` — Renderer → Backend の PCM 経路を通しで検証
 
 
-## 配布
+## 配布（macOS / Apple Silicon）
 
 ```bash
-npm run dist
+npm run package:mac
 ```
 
+`release/mac-arm64/KoeNote.app`、`release/KoeNote-<version>-arm64.dmg`、
+`release/KoeNote-<version>-arm64.zip` を生成します。
+
+内訳:
+
+| 段階 | コマンド | 内容 |
+|---|---|---|
+| 1 | `npm run package:backend` | Backend を PyInstaller で単体実行形式へ固める（`backend/packaging/dist/koenote-backend/`） |
+| 2 | `npm run build` | 型チェック → Electron ビルド → Renderer ビルド |
+| 3 | `electron-builder --mac --arm64` | `.app` と `.dmg` を作成 |
+
 `electron-builder` の設定は `package.json` の `build` セクションにあります。
-`backend/` は `extraResources` として同梱されます（`.venv` / `__pycache__` を除外）。
-配布先マシンにも Python と依存関係、ffmpeg が必要です。
+
+### 同梱するもの / しないもの
+
+同梱する:
+
+- Backend 実行形式（Python ランタイム、fastapi / uvicorn / faster-whisper / ctranslate2 /
+  onnxruntime / av を含む）。パッケージ版は開発用 `.venv` もリポジトリも参照しません。
+
+同梱しない（実行マシン側の前提）:
+
+- **ffmpeg / ffprobe** — Homebrew 版が必要です（`/opt/homebrew/bin` または `/usr/local/bin`）。
+  `brew install ffmpeg` で導入してください。見つからない場合は `/api/health` の
+  `ffmpeg_ok` が `false` になります。
+- **Whisper モデル** — 初回利用時に Hugging Face から `~/.cache/huggingface` へ取得します
+  （small で約 464MB、tiny で約 75MB）。初回だけネットワークが必要です。
+
+### 制限
+
+- **ファイル一括文字起こし（File Trans）はパッケージ版では利用できません。**
+  別プロセスの Python ワーカーを起動する実装のため、実行形式へ固めた環境では動きません。
+  利用する場合は別途 Python を用意し、環境変数 `KOENOTE_PYTHON` にそのパスを指定してください。
+  指定がない場合は黙って誤動作せず、明示的なエラーになります。
+- **Backend のポートは既定 8765 です。** 他アプリと衝突する場合は環境変数 `KOENOTE_PORT`
+  で変更できます。既に同じポートで応答があっても、`/api/health` が `app: "KoeNote"` を
+  名乗らない限り再利用しません（無関係のサーバへ接続しないため）。
+
+### 署名と Gatekeeper
+
+現状の `.app` はローカルのキーチェーンにある **Apple Development 証明書**で署名され、
+公証（notarization）は行っていません。そのため `spctl -a -t exec` は `rejected` になり、
+Finder から初回起動すると「開発元を検証できません」の警告が出ます。
+
+回避は macOS 標準の手順で行ってください（右クリック →「開く」、または
+システム設定 →「プライバシーとセキュリティ」→「このまま開く」）。
+Gatekeeper 自体の無効化や、成果物全体への `xattr -dr` は行わないでください。
+警告なしで配布したい場合は Developer ID 証明書と公証が必要です。
 
 ## 入力デバイスの確認
 

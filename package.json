@@ -1,6 +1,6 @@
 {
-  "name": "bridgelog",
-  "productName": "BridgeLog",
+  "name": "koenote",
+  "productName": "KoeNote",
   "version": "0.1.0",
   "private": true,
   "description": "会議・セミナーの長時間文字起こしを行い、マイGPTへ渡す準備を整えるデスクトップアプリ",
@@ -19,7 +19,9 @@
     "test:unit": "vitest run --config vitest.config.ts",
     "test:unit:watch": "vitest --config vitest.config.ts --watch",
     "test:backend": "cd backend && \"$(node -e \"const fs=require('fs');const v='../.venv/bin/python';process.stdout.write(fs.existsSync(v)?v:'python3')\")\" -m unittest discover -s tests -p 'test_*.py'",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "package:backend": "rm -rf backend/packaging/build backend/packaging/dist && \"$(node -e \"const fs=require('fs');const v='./.venv/bin/python';process.stdout.write(fs.existsSync(v)?v:'python3')\")\" -m PyInstaller --noconfirm --clean --distpath backend/packaging/dist --workpath backend/packaging/build backend/packaging/koenote_backend.spec",
+    "package:mac": "npm run package:backend && npm run build && electron-builder --mac --arm64"
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -41,28 +43,44 @@
     "wait-on": "^7.2.0"
   },
   "build": {
-    "appId": "com.hashimoto.bridgelog",
-    "productName": "BridgeLog",
+    "appId": "com.hashimoto.koenote",
+    "productName": "KoeNote",
     "files": [
       "electron/dist/**/*",
       "frontend/dist/**/*"
     ],
     "extraResources": [
       {
-        "from": "backend",
-        "to": "backend",
-        "filter": [
-          "**/*",
-          "!.venv",
-          "!**/__pycache__"
-        ]
+        "from": "backend/packaging/dist/koenote-backend",
+        "to": "koenote-backend"
       }
     ],
     "mac": {
       "category": "public.app-category.productivity",
       "target": [
-        "dmg"
-      ]
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "録音して文字起こしを行うためにマイクを使用します。"
+      },
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist"
+    },
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
     }
   }
 }

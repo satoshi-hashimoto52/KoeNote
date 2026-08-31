@@ -156,7 +156,7 @@ export function SettingsModal({
               type="text"
               aria-label="文字起こしファイル保存先"
               title={draft.saveFolder || '文字起こしファイル保存先'}
-              placeholder="/Users/you/Documents/BridgeLog"
+              placeholder="/Users/you/Documents/KoeNote"
               value={draft.saveFolder}
               disabled={recording}
               className={errors.saveFolder ? 'invalid' : ''}

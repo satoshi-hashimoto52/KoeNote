@@ -8,7 +8,7 @@ const { app, BrowserWindow } = require('electron');
 const path = require('path');
 
 const INDEX = path.join(__dirname, '..', 'frontend', 'dist', 'index.html');
-const PORT = Number(process.env.BRIDGELOG_PORT || 8000);
+const PORT = Number(process.env.KOENOTE_PORT || 8765);
 const SECONDS = Number(process.env.CHECK_SECONDS || 14);
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
