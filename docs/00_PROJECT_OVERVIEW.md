@@ -16,6 +16,10 @@
 | bundle identifier | `com.hashimoto.koenote` | `package.json` `build.appId` |
 | 対象プラットフォーム | macOS / arm64 | `package.json` `build.mac.target` |
 | ライセンス | 不明（`LICENSE` ファイルおよび `package.json` に記載なし） | リポジトリ走査 |
+| 最新リリース | [v0.1.0](https://github.com/satoshi-hashimoto52/KoeNote/releases/tag/v0.1.0) | GitHub Releases |
+
+配布物は `KoeNote-0.1.0-arm64.dmg` / `KoeNote-0.1.0-arm64.zip` / `SHA256SUMS.txt` の 3 点です。
+通常は DMG を使用してください。導入手順と検証方法は [`README.md`](../README.md) を参照してください。
 
 ## 解決する課題
 

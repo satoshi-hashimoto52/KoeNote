@@ -12,6 +12,58 @@
 > 本アプリは以前 **BridgeLog** という名称でした。`docs/` 配下の受け入れ試験記録や Issue には
 > 当時の名称が残っていますが、当時の記録として意図的に維持しています。
 
+## ダウンロード
+
+**[最新版をダウンロード（v0.1.0）](https://github.com/satoshi-hashimoto52/KoeNote/releases/tag/v0.1.0)**
+
+| ファイル | 用途 |
+|---|---|
+| `KoeNote-0.1.0-arm64.dmg` | **通常はこちらを使用してください** |
+| `KoeNote-0.1.0-arm64.zip` | DMG を使えない場合の代替 |
+| `SHA256SUMS.txt` | ダウンロードしたファイルの検証用 |
+
+### 前提
+
+- **Apple Silicon（arm64）専用**です。Intel Mac では動作しません。
+- **Homebrew 版の `ffmpeg` / `ffprobe` が必要**です（アプリへ同梱していません）。
+
+  ```bash
+  brew install ffmpeg
+  ```
+
+- **Whisper モデルは初回利用時に取得**します（`~/.cache/huggingface`、約 538MB）。
+  初回だけインターネット接続が必要です。
+- **File Trans（ファイル一括文字起こし）はパッケージ版では利用できません。**
+  リアルタイム文字起こしは利用できます。
+
+### インストール
+
+1. `KoeNote-0.1.0-arm64.dmg` をダウンロードして開く
+2. `KoeNote.app` を Applications フォルダへコピーする
+3. **初回は `KoeNote.app` を右クリック →「開く」**を選ぶ
+4. 確認画面でも「開く」を選ぶ
+5. マイクへのアクセスを許可する
+
+公証を行っていないため、ダブルクリックでは「開発元を検証できません」と表示されます。
+右クリック →「開く」で起動できます。
+
+### ダウンロードファイルの検証
+
+`SHA256SUMS.txt` と DMG / ZIP を同じディレクトリへ置いて実行します。
+
+```bash
+shasum -a 256 -c SHA256SUMS.txt
+```
+
+`OK` が表示されれば、ファイルは改変されていません。
+
+### 署名と公証について
+
+- `.app` は **Apple Development 証明書で署名済み**です。
+- **Apple による公証（notarization）は未実施**です。
+- 公証には **Apple Developer Program への有料登録が必要**です。
+- **現時点では対応を保留**しています。
+
 ## ドキュメント
 
 設計・運用の詳細は [`docs/00_PROJECT_OVERVIEW.md`](docs/00_PROJECT_OVERVIEW.md) を入口としてください。
@@ -412,14 +464,16 @@ npm run package:mac
 
 ### 署名と Gatekeeper
 
-現状の `.app` はローカルのキーチェーンにある **Apple Development 証明書**で署名され、
-公証（notarization）は行っていません。そのため `spctl -a -t exec` は `rejected` になり、
+`.app` は **Apple Development 証明書**で署名済みです。
+**Apple による公証（notarization）は未実施**のため `spctl -a -t exec` は `rejected` になり、
 Finder から初回起動すると「開発元を検証できません」の警告が出ます。
 
 回避は macOS 標準の手順で行ってください（右クリック →「開く」、または
 システム設定 →「プライバシーとセキュリティ」→「このまま開く」）。
 Gatekeeper 自体の無効化や、成果物全体への `xattr -dr` は行わないでください。
-警告なしで配布したい場合は Developer ID 証明書と公証が必要です。
+
+公証には **Apple Developer Program への有料登録が必要**です。
+**現時点では対応を保留**しています。
 
 ## 入力デバイスの確認
 

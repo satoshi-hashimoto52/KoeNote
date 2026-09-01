@@ -68,6 +68,29 @@ Backend は Electron が子プロセスとして自動起動するため、単�
 | ZIP | `release/KoeNote-0.1.0-arm64.zip` |
 
 出力先は `package.json` `build.directories.output` = `release` です。
+`release/` は `.gitignore` 済みで、成果物を Git へ追加しません。
+
+### リリース（v0.1.0 の実績）
+
+配布は GitHub Releases で行っています。最新は
+[v0.1.0](https://github.com/satoshi-hashimoto52/KoeNote/releases/tag/v0.1.0) です。
+
+添付するのは次の 3 点で、`.app` ディレクトリは直接アップロードしません。
+
+| ファイル |
+|---|
+| `KoeNote-0.1.0-arm64.dmg` |
+| `KoeNote-0.1.0-arm64.zip` |
+| `SHA256SUMS.txt` |
+
+`SHA256SUMS.txt` は `release/` で DMG と ZIP の 2 件だけを対象に作成し、
+Release 添付専用として Git へはコミットしません。
+
+```bash
+cd release
+shasum -a 256 KoeNote-0.1.0-arm64.dmg KoeNote-0.1.0-arm64.zip > SHA256SUMS.txt
+shasum -a 256 -c SHA256SUMS.txt
+```
 
 ## test
 

@@ -247,3 +247,102 @@ README に含めていないもの（意図的）:
 |---|---|
 | `LICENSE` の不在 | 未対応。公開リポジトリだがライセンス未定義 |
 | ルート直下の `CLAUDE.md` | 未対応。Claude Code が自動読み込みするのはルートの `CLAUDE.md`。本書は指示どおり `docs/` に置いている |
+
+---
+
+## v0.1.0 リリース後の最終文書監査
+
+現行の HEAD・実行アプリ・GitHub Release と、リポジトリ内の全 Markdown（**34 件**）を照合しました。
+文書を先に信用せず、コードと設定から事実を確定したうえで突き合わせています。
+
+### 実装から確定した事実
+
+| 項目 | 値 | 取得元 |
+|---|---|---|
+| 製品名 / version | KoeNote / 0.1.0 | `package.json` |
+| bundle identifier | `com.hashimoto.koenote` | `package.json` `build.appId` |
+| 対応環境 | macOS / Apple Silicon（arm64） | `build.mac.target` |
+| 初期サイズ / 最小サイズ | 320×530 / 320×480 | `electron/main.ts` |
+| Backend port | 8765 | `electron/backend.ts` |
+| health の `app` | `KoeNote` | `backend/main.py` |
+| 設定ファイル | `~/Library/Application Support/KoeNote/koenote-settings.json` | `electron/ipc/handlers.ts` |
+| 設定キー | `gptUrl` / `saveFolder` / `deviceId` / `deviceLabel` / `model` / `delayMode` / `requestTemplate` / `transcriptHeight` / `windowOpacity`（9 件） | `App.tsx` / `settingsMigration.ts` |
+| 入力デバイス再解決 | `deviceId` → ラベル一意一致 → 既定入力（`groupId` は使わない） | `inputDevice.ts` |
+| 警告の自動消去 | 8000ms（`input-device-fallback` のみ） | `uiNotice.ts` |
+| windowOpacity | 0.70〜1.00 / 既定 1.00 / 0.05 刻み | `windowOpacity.ts` |
+| ffmpeg / ffprobe | 同梱しない。`/opt/homebrew/bin` → `/usr/local/bin` を探索 | `electron/backend.ts` |
+| Whisper モデル | 初回利用時に取得（tiny / base / small / medium、既定 small） | `live_transcriber.py` |
+| File Trans | パッケージ版では利用不可（frozen で明示的に失敗） | `transcriber.py` |
+| Vitest | 15 ファイル / **235 件** | 実行結果 |
+| Backend | 12 ファイル / **106 件** | 実行結果 |
+| パッケージ作成 | `npm run package:backend` → `npm run package:mac` | `package.json` |
+
+### GitHub Release
+
+| 項目 | 値 |
+|---|---|
+| 最新版 | **v0.1.0** |
+| URL | https://github.com/satoshi-hashimoto52/KoeNote/releases/tag/v0.1.0 |
+| 添付 | `KoeNote-0.1.0-arm64.dmg` / `KoeNote-0.1.0-arm64.zip` / `SHA256SUMS.txt` |
+
+`README.md` へ「最新版をダウンロード」節（通常は DMG、Apple Silicon 専用、
+右クリック →「開く」、`SHA256SUMS.txt` による検証、ffmpeg の前提、
+Whisper モデルの初回取得、File Trans の制限）を追加しました。
+
+公証については次の事実だけを記載しています。
+
+- Apple Development 証明書で署名済み
+- Apple による公証は未実施
+- 公証には Apple Developer Program への有料登録が必要
+- 現時点では対応を保留
+
+### 文書間の整合（検索結果）
+
+現在状態を説明する 13 文書を対象に検索しました。
+
+| 検索語 | 結果 |
+|---|---|
+| `port 8000` / `127.0.0.1:8000` / `8010` | **0 件** |
+| 古いテスト件数（142 / 192 / 208 / 130 / 103 / 53） | **0 件** |
+| 「未公開」「未作成」「コミットしていない」「pushしていない」「未コミット」 | 現在状態を説明する箇所には **0 件** |
+| 0.1.0 以外の製品バージョン | **0 件** |
+| `localhost:5173` | 5 件。すべて**開発サーバの説明**または `deviceId` が origin 依存であることの説明で、正当 |
+| `BridgeLog` / `bridgelog` | 現在文書に 12 件。すべて**改称履歴**または**旧設定の移行説明**で、正当 |
+
+過去の受け入れ試験記録（`docs/manual-acceptance-long-transcription.md`）、
+移植調査（`docs/migration_analysis.md`）、および各 Issue 文書の当時の記録は
+**一切変更していません**。過去の証拠を現在名称へ機械的に置換していません。
+
+### Issue 状態の一致
+
+| 分類 | Issue |
+|---|---|
+| 解決済み | 0006 / 0007 / 0008 / 0009 / **0010 / 0011 / 0012 / 0013 / 0015 / 0016 / 0017 / 0018** |
+| 対応中 | 0001 |
+| 未解決・未着手 | **0002 / 0003 / 0004 / 0005 / 0014** |
+
+各 Issue 文書の「状態」行と `10_KNOWN_LIMITATIONS.md` / `09_AI_DEVELOPMENT_GUIDE.md` /
+`CLAUDE.md` の一覧が一致することを確認しました。
+
+監査で見つけて修正した不一致:
+
+| 箇所 | 内容 |
+|---|---|
+| `10_KNOWN_LIMITATIONS.md` | 解決済み表に **0017 / 0018 が欠落**していたので追加 |
+| `issues/0011-*.md` | 状態行の「未コミット」が古い記述（実際は `50c36e4` でコミット済み）。現在状態の記述なので修正 |
+
+> `issues/0015-*.md` の「Vitest 130 件 / Backend 103 件で検証」は、
+> **当時の検証記録**として意図的に残しています（現在の件数ではありません）。
+
+### 変更した文書
+
+| 文書 | 変更内容 |
+|---|---|
+| `README.md` | ダウンロード節（Release リンク・前提・インストール・検証・署名と公証）を追加。既存の署名節を公証の事実へ統一 |
+| `docs/00_PROJECT_OVERVIEW.md` | 最新リリース v0.1.0 と配布物 3 点を追記 |
+| `docs/04_BUILD_AND_RUN.md` | リリース手順（添付 3 点・`SHA256SUMS.txt` の作り方・Git へコミットしないこと）を追記 |
+| `docs/10_KNOWN_LIMITATIONS.md` | 解決済み Issue へ 0017 / 0018 を追加 |
+| `docs/issues/0011-*.md` | 状態行の「未コミット」を実際のコミット `50c36e4` へ修正 |
+| `docs/DOCUMENTATION_REPORT.md` | 本節を追記 |
+
+コード・設定・`package-lock.json` は変更していません。
