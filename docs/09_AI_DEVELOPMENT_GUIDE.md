@@ -7,7 +7,7 @@
 
 | 項目 | 値 |
 |---|---|
-| 名称 | KoeNote `0.1.0` |
+| 名称 | KoeNote `0.1.1` |
 | 目的 | 会議・セミナーの長時間文字起こしと、マイGPT へ渡す準備 |
 | 構成 | Electron main + React Renderer + FastAPI Backend の 3 プロセス |
 | 対象 | macOS / arm64 |

@@ -426,3 +426,53 @@ Whisper モデルの初回取得、File Trans の制限）を追加しました�
 `gh issue list --state all` の結果は **0 件**（Issues 機能は有効だが未使用）。
 Issue 追跡は `docs/issues/` のローカル文書のみで行っており、
 GitHub 側との状態差は**存在しません**。close 対象もありません。
+
+---
+
+## v0.1.1 リリース準備（2026-09-14）
+
+Issue #0019 の実装（`bc705c0`）を配布版へ反映するため、
+製品バージョンを `0.1.0` → `0.1.1` へ更新しました。
+
+### version を保持していた箇所（調査結果）
+
+| 箇所 | 対応 |
+|---|---|
+| `package.json` `version` | 0.1.1 へ更新 |
+| `package-lock.json` `version` / `packages[""].version` | 0.1.1 へ更新（依存パッケージの version には影響なし） |
+| Electron アプリの version | `package.json` から electron-builder が読むため、個別の保持箇所は**無し** |
+| Backend の version 応答 | **無し**（`/api/health` は `app` のみ返す）。追加していない |
+| `session.json` の製品 version | **無し**（`app: "KoeNote"` のみ）。追加していない |
+| コード内の直書き | **0 件**（`package.json` 以外に `0.1.0` の直書きは存在しなかった） |
+
+### 変更した文書
+
+| 文書 | 変更内容 |
+|---|---|
+| `CHANGELOG.md` | **新規作成**。v0.1.1 の変更履歴と未確認事項、v0.1.0 の記録 |
+| `README.md` | ダウンロード先を `releases/latest` へ。配布物名を 0.1.1 へ。CHANGELOG へのリンクを追加 |
+| `docs/00_PROJECT_OVERVIEW.md` | バージョン・最新リリース・配布物名 |
+| `docs/04_BUILD_AND_RUN.md` | 成果物名を `<version>` 表記へ。リリース手順（タグ・Release 作成）を追記。**署名に必要な確認**を追記。v0.1.0 を「過去のリリース実績」として残す |
+| `docs/09_AI_DEVELOPMENT_GUIDE.md` | バージョン |
+| `docs/CLAUDE.md` | バージョン・成果物名 |
+| `docs/DOCUMENTATION_REPORT.md` | 本節 |
+
+### 維持した v0.1.0 固有の記録
+
+機械的な一括置換は行わず、次はそのまま残しました。
+
+- `docs/DOCUMENTATION_REPORT.md` の「v0.1.0 リリース後の最終文書監査」節
+- `docs/04_BUILD_AND_RUN.md` の「過去のリリース実績」表
+- `docs/issues/` 配下の当時の検証記録
+- v0.1.0 のタグ・Release・添付ファイル
+
+### 署名証明書について
+
+`security find-identity -v -p codesigning` が **0 valid identities** を返す状態でした。
+キーチェーンの Apple Development 証明書 4 枚はすべて期限切れで、
+最新のものも **2026-09-01 に失効**しています（v0.1.0 のビルドはその 1 日前）。
+
+`package.json` は `mac.identity` を指定せず自動選択のため、
+このままビルドすると署名がスキップされ配布物の性質が変わります。
+再発防止として `docs/04_BUILD_AND_RUN.md` へ
+「ビルド前に署名 identity を確認する」手順を追記しました。

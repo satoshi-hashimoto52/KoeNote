@@ -14,13 +14,15 @@
 
 ## ダウンロード
 
-**[最新版をダウンロード（v0.1.0）](https://github.com/satoshi-hashimoto52/KoeNote/releases/tag/v0.1.0)**
+**[最新版をダウンロード](https://github.com/satoshi-hashimoto52/KoeNote/releases/latest)**（現在 v0.1.1）
 
 | ファイル | 用途 |
 |---|---|
-| `KoeNote-0.1.0-arm64.dmg` | **通常はこちらを使用してください** |
-| `KoeNote-0.1.0-arm64.zip` | DMG を使えない場合の代替 |
+| `KoeNote-0.1.1-arm64.dmg` | **通常はこちらを使用してください** |
+| `KoeNote-0.1.1-arm64.zip` | DMG を使えない場合の代替 |
 | `SHA256SUMS.txt` | ダウンロードしたファイルの検証用 |
+
+変更点は [`CHANGELOG.md`](CHANGELOG.md) を参照してください。
 
 ### 前提
 
@@ -38,7 +40,7 @@
 
 ### インストール
 
-1. `KoeNote-0.1.0-arm64.dmg` をダウンロードして開く
+1. `KoeNote-0.1.1-arm64.dmg` をダウンロードして開く
 2. `KoeNote.app` を Applications フォルダへコピーする
 3. **初回は `KoeNote.app` を右クリック →「開く」**を選ぶ
 4. 確認画面でも「開く」を選ぶ

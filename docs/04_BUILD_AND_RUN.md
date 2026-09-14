@@ -64,33 +64,64 @@ Backend は Electron が子プロセスとして自動起動するため、単�
 | 成果物 | パス |
 |---|---|
 | アプリ | `release/mac-arm64/KoeNote.app` |
-| DMG | `release/KoeNote-0.1.0-arm64.dmg` |
-| ZIP | `release/KoeNote-0.1.0-arm64.zip` |
+| DMG | `release/KoeNote-<version>-arm64.dmg`（現在 `0.1.1`） |
+| ZIP | `release/KoeNote-<version>-arm64.zip`（現在 `0.1.1`） |
 
 出力先は `package.json` `build.directories.output` = `release` です。
 `release/` は `.gitignore` 済みで、成果物を Git へ追加しません。
 
-### リリース（v0.1.0 の実績）
+### リリース手順
 
 配布は GitHub Releases で行っています。最新は
-[v0.1.0](https://github.com/satoshi-hashimoto52/KoeNote/releases/tag/v0.1.0) です。
+[releases/latest](https://github.com/satoshi-hashimoto52/KoeNote/releases/latest) です。
 
 添付するのは次の 3 点で、`.app` ディレクトリは直接アップロードしません。
 
 | ファイル |
 |---|
-| `KoeNote-0.1.0-arm64.dmg` |
-| `KoeNote-0.1.0-arm64.zip` |
+| `KoeNote-<version>-arm64.dmg` |
+| `KoeNote-<version>-arm64.zip` |
 | `SHA256SUMS.txt` |
 
 `SHA256SUMS.txt` は `release/` で DMG と ZIP の 2 件だけを対象に作成し、
-Release 添付専用として Git へはコミットしません。
+Release 添付専用として Git へはコミットしません。絶対パスは書きません。
 
 ```bash
 cd release
-shasum -a 256 KoeNote-0.1.0-arm64.dmg KoeNote-0.1.0-arm64.zip > SHA256SUMS.txt
+shasum -a 256 KoeNote-0.1.1-arm64.dmg KoeNote-0.1.1-arm64.zip > SHA256SUMS.txt
 shasum -a 256 -c SHA256SUMS.txt
 ```
+
+タグは version 更新コミットへ annotated tag で作成します。
+
+```bash
+git tag -a v0.1.1 <version更新コミット> -m "KoeNote v0.1.1"
+git push origin v0.1.1
+gh release create v0.1.1 \
+  release/KoeNote-0.1.1-arm64.dmg \
+  release/KoeNote-0.1.1-arm64.zip \
+  release/SHA256SUMS.txt \
+  --repo satoshi-hashimoto52/KoeNote \
+  --title "KoeNote v0.1.1" \
+  --notes-file <Releaseノート>
+```
+
+#### 署名に必要なもの
+
+`package.json` は `mac.identity` を指定しておらず、electron-builder が
+キーチェーンから**有効な** Apple Development 証明書を自動選択します。
+証明書が期限切れだと署名はスキップされ、配布物の性質が変わります。
+ビルド前に必ず次で確認してください。
+
+```bash
+security find-identity -v -p codesigning   # "0 valid identities found" なら要更新
+```
+
+#### 過去のリリース実績
+
+| バージョン | 公開日 | 備考 |
+|---|---|---|
+| [v0.1.0](https://github.com/satoshi-hashimoto52/KoeNote/releases/tag/v0.1.0) | 2026-08-31 | 初回リリース |
 
 ## test
 

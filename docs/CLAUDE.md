@@ -12,7 +12,7 @@
 | 項目 | 値 |
 |---|---|
 | 名称 | KoeNote |
-| バージョン | `0.1.0` |
+| バージョン | `0.1.1` |
 | 説明 | 会議・セミナーの長時間文字起こしを行い、マイGPTへ渡す準備を整えるデスクトップアプリ |
 | bundle identifier | `com.hashimoto.koenote` |
 | 対象 | macOS / arm64 |
@@ -48,8 +48,8 @@ npm run package:backend  # Backend を PyInstaller で単体実行形式へ
 npm run package:mac      # .app / .dmg / .zip を release/ へ出力
 ```
 
-成果物: `release/mac-arm64/KoeNote.app`, `release/KoeNote-0.1.0-arm64.dmg`,
-`release/KoeNote-0.1.0-arm64.zip`
+成果物: `release/mac-arm64/KoeNote.app`, `release/KoeNote-0.1.1-arm64.dmg`,
+`release/KoeNote-0.1.1-arm64.zip`
 
 ## テスト方法
 
