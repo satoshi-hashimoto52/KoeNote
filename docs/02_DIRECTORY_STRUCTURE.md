@@ -60,6 +60,7 @@ KoeNote/
 │   ├── backend-lifecycle.ts
 │   ├── backend-lifecycle.test.ts
 │   └── ipc/
+│       ├── atomicJson.ts / .test.ts
 │       ├── diagnostics.ts / .test.ts
 │       ├── handlers.ts
 │       ├── openExternal.ts / .test.ts
@@ -118,6 +119,7 @@ KoeNote/
 | `main.py` | 60 | FastAPI 生成、CORS、ルータ登録、`/api/health` |
 | `routes/whisper.py` | 920 | File Trans のジョブ管理と `/ws/live` |
 | `routes/session.py` | 105 | セッションフォルダ作成・確定・診断・WAV 修復 |
+| `routes/audio.py` | — | 入力テストとプリセット参照（0019） |
 | `services/live_session.py` | 1071 | リアルタイム文字起こしのセッション状態と窓処理 |
 | `services/word_commit.py` | 360 | word timestamp 単位の確定判定 |
 | `services/transcriber.py` | 557 | File Trans の実行制御、ffmpeg/Python 解決 |
@@ -126,6 +128,11 @@ KoeNote/
 | `services/runner.py` | 280 | File Trans の別プロセスワーカー |
 | `services/session_store.py` | 155 | セッションフォルダとメタデータ管理 |
 | `services/pcm_stream.py` | — | PCM16LE mono ストリーム基盤・リサンプラ |
+| `services/audio_levels.py` | — | 入力レベルの測定・dBFS 変換・総合判定（0019） |
+| `services/input_profile.py` | — | 入力モードと入力方式別プリセット（0019） |
+| `services/input_gain.py` | — | 解析用 PCM のストリーミング音量補正（0019） |
+| `services/calibration.py` | — | 入力テストの算出（0019） |
+| `services/segments_writer.py` | — | `transcript_segments.json` の逐次保存（0019 / 旧 #0004） |
 | `services/live_registry.py` | — | WS 切断後も LiveSession を保持するレジストリ |
 | `services/exporter.py` | — | 出力ディレクトリ作成と成果物書き出し |
 | `services/file_utils.py` | — | テキストファイル書き込み |
@@ -141,6 +148,7 @@ KoeNote/
 | `backend.ts` | 251 | Backend の起動・監視・再起動・ログ保持 |
 | `backend-lifecycle.ts` | — | `classifyExit` / `createSingleFlight` / `isOwnBackendHealth` |
 | `ipc/handlers.ts` | — | `ipcMain.handle` 12 件の登録 |
+| `ipc/atomicJson.ts` | — | 設定 JSON の原子的書き込み（一意な一時名 + 直列化、0019） |
 | `ipc/diagnostics.ts` | — | Backend 非依存の diagnostics.log 追記 |
 | `ipc/openExternal.ts` | — | 許可ホスト判定と Chrome 起動 |
 | `ipc/settingsMigration.ts` | — | 旧 BridgeLog 設定の移行計画（純関数） |
@@ -171,6 +179,12 @@ KoeNote/
 | `components/windowOpacity.ts` | — | 不透明度の範囲・正規化（main と共用、0018） |
 | `components/InfoTip.tsx` | — | 小さな説明マーク（0017） |
 | `features/transcription/inputDevice.ts` | — | 入力デバイスの解決と取得（純関数中心、0016） |
+| `features/audio/inputProfile.ts` | — | 入力モード・プリセット・デバイス別設定（純関数、0019） |
+| `features/audio/levelMeter.ts` | — | レベルの平滑化と状態分類（純関数、0019） |
+| `features/audio/lowVolumeWarning.ts` | — | 低音量警告の状態機械（純関数、0019） |
+| `features/audio/calibration.ts` | — | 入力テストの進行と結果表示（純関数、0019） |
+| `components/InputLevelMeter.tsx` | — | 録音中の入力レベルメーター（0019） |
+| `components/CalibrationModal.tsx` | — | 入力テストモーダル（0019） |
 | `services/api.ts` | — | Backend API 呼び出しと依頼文生成 |
 | `types/bridge.ts` | — | `window.bridge` の型 |
 

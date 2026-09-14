@@ -14,6 +14,7 @@ if str(BACKEND_ROOT) not in sys.path:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from routes.audio import router as audio_router
 from routes.whisper import live_router as whisper_live_router
 from routes.whisper import router as whisper_router
 from routes.session import router as session_router
@@ -31,6 +32,7 @@ app.add_middleware(
 app.include_router(whisper_router)
 app.include_router(whisper_live_router)
 app.include_router(session_router)
+app.include_router(audio_router)
 
 
 @app.get("/api/health")

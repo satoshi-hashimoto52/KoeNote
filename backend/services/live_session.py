@@ -4,20 +4,29 @@ import subprocess
 import tempfile
 import wave
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from .audio_levels import (
+    ABSOLUTE_SILENCE_RMS,
+    CLIP_LEVEL,
+    LEVEL_FRAME_SAMPLES,
+    MIN_SNR_DB,
+    db_from_amplitude,
+)
+from .input_gain import AdaptiveGain
+from .input_profile import InputProfile, build_profile
 from .live_transcriber import (
     DEFAULT_MODEL,
-    MIN_RMS,
     SUPPORTED_MODELS,
     convert_webm_bytes_to_wav,
     transcribe_pcm16,
     transcribe_wav_file,
 )
 from .pcm_stream import BYTES_PER_SAMPLE, SAMPLE_RATE, PcmRingBuffer, Resampler16k
+from .segments_writer import SegmentsWriter, build_record
 from .transcriber import resolve_ffmpeg_dir
 from .word_commit import (
     ANCHOR_WORDS,
@@ -51,6 +60,12 @@ MIN_FLUSH_TAIL_SECONDS = 0.5
 MAX_DEGRADE_LOG_LINES = 200
 # 遅延がこれを超えたら overlap を捨ててスループットを稼ぐ（音声を落とす前の安全弁）。
 LAG_CATCHUP_THRESHOLD_SECONDS = 30.0
+# 入力レベルの集計を診断へ吐く間隔。チャンクごとに書くとログが肥大化する（0019）。
+LEVEL_REPORT_INTERVAL_SECONDS = 60.0
+# 窓を推論へ回すために必要な発話フレーム数。1 で実測スキップ率 0.8%（旧 79.2%）。
+MIN_SPEECH_FRAMES_PER_WINDOW = 1
+# フレーム測定の履歴として保持する秒数。窓の発話判定に使うぶんだけあればよい。
+LEVEL_HISTORY_SECONDS = 90.0
 
 
 def _clamp_float(value, default: float, minimum: float, maximum: float) -> float:
@@ -95,6 +110,8 @@ class LiveSessionConfig:
     send_mode: str = "chunks"
     sample_rate: int = SAMPLE_RATE
     debug: bool = False
+    # 0019: 入力モード / プリセット。未指定なら auto（デバイス名から判定）。
+    input_profile: InputProfile = field(default_factory=InputProfile)
 
     @classmethod
     def from_payload(cls, payload: dict) -> "LiveSessionConfig":
@@ -137,6 +154,10 @@ class LiveSessionConfig:
             send_mode=send_mode,
             sample_rate=sample_rate,
             debug=bool(payload.get("debug", False)),
+            input_profile=build_profile(
+                payload.get("input_profile"),
+                payload.get("device_label"),
+            ),
         )
 
 
@@ -160,6 +181,7 @@ class LiveSession:
         self.committed_segments: list[dict] = []
         self.partial_segments: list[dict] = []
         self.saved_path: Optional[str] = None
+        self.segments_path: Optional[str] = None
         self._file = None
         self.raw_chunks: list[bytes] = []
         self.last_inferred_duration = 0.0
@@ -200,9 +222,35 @@ class LiveSession:
         self._needs_recheck = False
         self._last_planned: Optional[tuple[int, int]] = None
 
+        # --- 0019: 入力レベルの補正と測定 ---
+        self.profile = config.input_profile
+        self.gain = AdaptiveGain(self.profile, sample_rate=SAMPLE_RATE,
+                                 frame_samples=LEVEL_FRAME_SAMPLES)
+        # フレーム測定の履歴。絶対サンプル番号で addressing し、古い分は捨てる。
+        # (frame_end_sample, raw_rms, is_speech) の 3 つ組だけ持つので状態量は有界。
+        self._level_frames: list[tuple[int, float, bool]] = []
+        self._level_history_frames = max(
+            int(LEVEL_HISTORY_SECONDS * SAMPLE_RATE / LEVEL_FRAME_SAMPLES), 1
+        )
+        self._level_reported_at = 0.0
+        self.level_state = "ok"
+        self.level_state_changed_at: Optional[str] = None
+        # 診断へ出すための累計。level_skipped と vad_silence は意味が違う（0019）。
+        self.level_skipped_samples = 0
+        self.vad_silence_samples = 0
+        self.repetitive_dropped_count = 0
+        self.pending_diagnostics: list[str] = []
+
+        self._segments_writer: Optional[SegmentsWriter] = None
         if config.write_to_file:
             self.saved_path = self._prepare_output_path(config.output_folder)
             self._file = open(self.saved_path, "a", encoding="utf-8")
+            # 0019 / 旧 #0004: session.json の宣言どおり segments も実際に書き出す。
+            try:
+                self._segments_writer = SegmentsWriter(Path(self.saved_path).parent)
+            except OSError:
+                # セグメント保存は補助情報。作れなくても録音は続ける。
+                self._segments_writer = None
 
     # ------------------------------------------------------------------
     # ライフサイクル
@@ -212,6 +260,13 @@ class LiveSession:
         if self._file is not None:
             self._file.close()
             self._file = None
+        if self._segments_writer is not None:
+            self.segments_path = self._segments_writer.finalize()
+            self._segments_writer = None
+
+    @property
+    def segments_written(self) -> int:
+        return self._segments_writer.count if self._segments_writer is not None else 0
 
     def finalize(self) -> dict:
         """最終確定。partial_text を無条件に追記しない。
@@ -287,14 +342,28 @@ class LiveSession:
     # ------------------------------------------------------------------
 
     def append_pcm(self, pcm: bytes) -> int:
-        """受信 PCM をリングバッファへ追記する。ここでは推論しない。"""
+        """受信 PCM を補正してリングバッファへ追記する。ここでは推論しない。
+
+        **補正するのは解析用のリングバッファだけ。** `recording.wav` へは
+        呼び出し側（routes/whisper.py）が補正前の生バイトを書く。
+        `AdaptiveGain.process` は入力と同じサンプル数を返すため、
+        `pcm.total_samples`（= server_total_samples）はクライアントの送信済み
+        サンプル数と一致し続ける。
+        """
         if not pcm:
             return self.pcm.total_samples
         if self._resampler is not None:
             pcm = self._resampler.process(pcm)
             if not pcm:
                 return self.pcm.total_samples
+
+        base = self.pcm.total_samples
+        pending_before = self.gain.pending_samples
+        corrected, levels = self.gain.process(pcm)
+        pcm = corrected if corrected else pcm
         total = self.pcm.append(pcm)
+        if levels:
+            self._record_levels(levels, base, pending_before)
         self.received_chunk_count += 1
         self.received_audio_bytes += len(pcm)
         self.received_audio_seconds = total / float(SAMPLE_RATE)
@@ -313,6 +382,169 @@ class LiveSession:
     # ------------------------------------------------------------------
     # PCM 経路: 窓の決定（event loop スレッド）
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # 0019: 入力レベルの記録と判定
+    # ------------------------------------------------------------------
+
+    def _record_levels(self, levels, base_sample: int, pending_before: int) -> None:
+        """完成したフレームを絶対サンプル番号付きで履歴へ積む。
+
+        フレーム k はこの呼び出しの入力を
+        ``(frame - pending_before) + k * frame`` サンプル消費した時点で完成する。
+        絶対位置はリングバッファの座標系（= server_total_samples）で持つ。
+        """
+        frame = self.gain.frame_samples
+        first_end = base_sample + (frame - pending_before)
+        for k, level in enumerate(levels):
+            end_sample = first_end + k * frame
+            self._level_frames.append((end_sample, level.raw_rms, level.is_speech))
+        if len(self._level_frames) > self._level_history_frames:
+            del self._level_frames[: len(self._level_frames) - self._level_history_frames]
+
+    def window_has_speech(self, start_sample: int, end_sample: int) -> bool:
+        """窓に発話フレームが含まれるか。
+
+        **窓平均 RMS では判定しない**（0019 の主原因）。10 秒窓の平均は発話の
+        合間の無音を含むため、ノイズフロアで相対化しても実測スキップ率 85.7%
+        に達し、遠方の通常発話を捨ててしまう。
+        判定は「窓内にノイズフロア +9dB を超えるフレームがあるか」で行う。
+
+        測定履歴が無い区間（履歴から溢れた古い窓など）は True を返す。
+        判断材料が無いときに捨てる側へ倒してはいけない。
+        """
+        frame = self.gain.frame_samples
+        hit = 0
+        seen = 0
+        for end, _raw, is_speech in self._level_frames:
+            if end <= start_sample or end - frame >= end_sample:
+                continue
+            seen += 1
+            if is_speech:
+                hit += 1
+                if hit >= MIN_SPEECH_FRAMES_PER_WINDOW:
+                    return True
+        if seen == 0:
+            return True
+        return False
+
+    def evaluate_level_state(self, window_seconds: float = 20.0) -> str:
+        """直近の入力レベルから状態を 1 つ決める（0019）。
+
+        返す値と意味:
+            ok        正常
+            silent_ok 発話が無く本当に静か（**警告してはいけない**通常の無言時間）
+            no_input  完全に入力がない
+            too_quiet 音量が小さい（最大ゲインでも目標へ届かない）
+            low_snr   環境音が大きすぎる
+            clipping  音割れしている
+
+        Backend/文字起こしの停止はここでは扱わない。既存の無進捗ウォッチドッグ
+        （frontend/features/transcription/watchdog.ts）の担当であり、
+        両者を混ぜると誤検知が相互に汚染する。
+
+        「継続時間」の判定は行わない。UI 方針（何秒で出すか、いつ消すか）は
+        frontend の lowVolumeWarning が持つ。ここは瞬時状態だけを返す。
+        """
+        if not self._level_frames:
+            return "ok"
+        cutoff = self.pcm.total_samples - int(max(window_seconds, 1.0) * SAMPLE_RATE)
+        recent = [f for f in self._level_frames if f[0] > cutoff]
+        if not recent:
+            recent = self._level_frames[-1:]
+
+        raws = [f[1] for f in recent]
+        speech = [f[1] for f in recent if f[2]]
+
+        if max(raws) < ABSOLUTE_SILENCE_RMS:
+            return "no_input"
+
+        telemetry = self.gain.telemetry
+        if telemetry.frames > 0:
+            # 天井に張り付くフレームが多い = 入力が大きすぎる。
+            if telemetry.limited_frames / telemetry.frames > 0.05:
+                return "clipping"
+        if max(raws) >= CLIP_LEVEL:
+            return "clipping"
+
+        if not speech:
+            # 入力はあるが発話が無い。無言時間として正常に扱う。
+            return "silent_ok"
+
+        speech_sorted = sorted(speech)
+        median = speech_sorted[len(speech_sorted) // 2]
+        floor = max(self.gain.noise_floor, 1e-9)
+        snr_db = db_from_amplitude(median) - db_from_amplitude(floor)
+        if snr_db < MIN_SNR_DB:
+            return "low_snr"
+
+        required_db = self.profile.target_speech_dbfs - db_from_amplitude(median)
+        if required_db > self.profile.max_gain_db:
+            return "too_quiet"
+        return "ok"
+
+    def level_snapshot(self) -> dict:
+        """UI・診断へ渡す現在のレベル状態。"""
+        recorded = max(self.recorded_seconds, 1e-9)
+        return {
+            "input_mode": self.profile.mode,
+            "detected_mode": self.profile.detected_mode,
+            "gain_mode": self.profile.gain_mode,
+            "gain_db": round(self.gain.gain_db, 1),
+            "noise_floor_dbfs": round(db_from_amplitude(self.gain.noise_floor), 1),
+            "speech_threshold_dbfs": round(db_from_amplitude(self.gain.speech_threshold()), 1),
+            "level_skipped_seconds": round(self.level_skipped_samples / float(SAMPLE_RATE), 2),
+            "level_skipped_ratio": round(
+                (self.level_skipped_samples / float(SAMPLE_RATE)) / recorded, 4
+            ),
+            "vad_silence_seconds": round(self.vad_silence_samples / float(SAMPLE_RATE), 2),
+            "repetitive_dropped_count": self.repetitive_dropped_count,
+            "level_state": self.level_state,
+        }
+
+    def maybe_report_levels(self) -> Optional[str]:
+        """60 秒ごとに集計を 1 行だけ返す。まだなら None。
+
+        チャンクごとにログを書くと diagnostics.log が肥大化するため、
+        一定間隔の集計と状態変化時だけに絞る（0019）。
+        """
+        now = self.recorded_seconds
+        if now - self._level_reported_at < LEVEL_REPORT_INTERVAL_SECONDS:
+            return None
+        self._level_reported_at = now
+        telemetry = self.gain.telemetry.as_dict()
+        self.gain.telemetry.reset()
+        if not telemetry["frames"]:
+            return None
+        snapshot = self.level_snapshot()
+        parts = [
+            f"window={LEVEL_REPORT_INTERVAL_SECONDS:.0f}s",
+            f"at={now:.0f}s",
+            f"noise_floor_dbfs={telemetry['noise_floor_dbfs']}",
+            f"raw_rms_dbfs={telemetry['raw_rms_dbfs']}",
+            f"corrected_rms_dbfs={telemetry['corrected_rms_dbfs']}",
+            f"gain_db={telemetry['gain_db']}",
+            f"gain_range_db={telemetry['gain_min_db']}..{telemetry['gain_max_db']}",
+            f"raw_peak_dbfs={telemetry['raw_peak_dbfs']}",
+            f"corrected_peak_dbfs={telemetry['corrected_peak_dbfs']}",
+            f"limited_frames={telemetry['limited_frames']}",
+            f"clipped_samples={telemetry['clipped_samples']}",
+            f"speech_frame_ratio={telemetry['speech_frame_ratio']}",
+            f"level_skipped_seconds={snapshot['level_skipped_seconds']}",
+            f"level_skipped_ratio={snapshot['level_skipped_ratio']}",
+            f"vad_silence_seconds={snapshot['vad_silence_seconds']}",
+            f"repetitive_dropped={snapshot['repetitive_dropped_count']}",
+        ]
+        return "input_levels " + " ".join(parts)
+
+    def set_level_state(self, state: str) -> Optional[str]:
+        """レベル状態が変わったときだけ診断行を返す。連続記録を避ける。"""
+        if state == self.level_state:
+            return None
+        previous = self.level_state
+        self.level_state = state
+        self.level_state_changed_at = _timestamp()
+        return f"input_level_state from={previous} to={state} at={self.recorded_seconds:.0f}s"
 
     def log_degraded(self, reason: str, **detail) -> None:
         """縮退・強制の発生を reason コード付きで記録する。"""
@@ -485,8 +717,17 @@ class LiveSession:
         pcm = self.pcm.read(start_sample, end_sample)
         if pcm is None:
             return None
+        # 窓平均 RMS ではなくフレーム基準で発話の有無を決める（0019）。
+        has_speech = self.window_has_speech(start_sample, end_sample)
         try:
-            return transcribe_pcm16(pcm, self.config.model, debug_save=self.config.debug_chunks)
+            return transcribe_pcm16(
+                pcm,
+                self.config.model,
+                debug_save=self.config.debug_chunks,
+                # 補正後 PCM に対する絶対下限。無効入力だけを弾く。
+                silence_rms=ABSOLUTE_SILENCE_RMS,
+                has_speech=has_speech,
+            )
         except Exception as exc:
             self.counters.inference_error_count += 1
             self._error_retries += 1
@@ -528,16 +769,39 @@ class LiveSession:
         if result is None:
             return None
 
-        # whisper が窓の一部を文字化しないことがある。確定が進まない窓が続いたら
-        # 境界をずらして再試行し、それでも駄目なら諦めて先へ進む（諦めた秒数を計上）。
-        has_speech = float(result.get("rms", 0.0) or 0.0) >= MIN_RMS
+        # 0019: 「音声があるか」は固定 RMS ではなくフレーム基準の相対判定で決める。
+        # 旧実装は rms < MIN_RMS を「正常な無音」として黙って飛ばしていたため、
+        # 79% の窓が捨てられても診断に何も残らなかった。
+        window_seconds = max(0.0, (end_sample - start_sample) / float(SAMPLE_RATE))
+        if result.get("level_skipped"):
+            # レベル判定で推論へ回さなかった。正常な無音であっても必ず計上する。
+            self.level_skipped_samples += max(0, end_sample - start_sample)
+            self.counters.level_skipped_seconds += window_seconds
+            has_speech = False
+        else:
+            has_speech = self.window_has_speech(start_sample, end_sample)
+            if result.get("no_speech"):
+                # 推論はしたが Silero VAD / 品質判定で発話が採れなかった。
+                self.vad_silence_samples += max(0, end_sample - start_sample)
+                self.counters.vad_silence_seconds += window_seconds
+        dropped = int(result.get("repetitive_dropped") or 0)
+        if dropped:
+            self.repetitive_dropped_count += dropped
+            self.counters.repetitive_dropped_count += dropped
+            self.log_degraded(
+                DegradeReason.REPETITIVE_SEGMENT_DROPPED,
+                window=f"{start_sample / SAMPLE_RATE:.2f}-{end_sample / SAMPLE_RATE:.2f}",
+                count=dropped,
+            )
+
         if self.committed_until_seconds > before + EPS:
             self._no_progress_rounds = 0
             self._giving_up_on_window = False
             self._needs_recheck = False
         elif not has_speech:
-            # 無音の窓で確定が進まないのは正常。カーソルは通常どおり進める。
+            # 発話フレームが無い窓で確定が進まないのは正常。カーソルは通常どおり進める。
             # ここで再確認を要求すると無音区間を最小前進で這うことになる。
+            # ただしスキップ秒数は上で必ず計上済み。黙って隠さない（0019）。
             self._no_progress_rounds = 0
             self._needs_recheck = False
         else:
@@ -649,6 +913,7 @@ class LiveSession:
         if committed_append:
             self.committed_text = _join_transcript(self.committed_text, committed_append)
             self._append_to_file(committed_append)
+            self._append_segment_record(confirm, chunk_result)
 
         self.pending_words = pending
         self.partial_segments = [{"start": w.start, "end": w.end, "text": w.text} for w in pending]
@@ -1025,6 +1290,29 @@ class LiveSession:
         folder.mkdir(parents=True, exist_ok=True)
         filename = self.config.output_filename or f"meeting_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         return str(folder / filename)
+
+    def _append_segment_record(self, confirm: list, chunk_result: dict) -> None:
+        """確定したぶんを transcript_segments.jsonl へ 1 行追記する（0019）。
+
+        確定は word 単位だが、1 語 1 行では実用にならないため、
+        **1 回の確定バッチ = 1 レコード**にする。transcript.txt への追記単位と
+        一致するので、2 つのファイルの内容がずれない。
+        時刻はセッション基準の絶対経過秒。
+        """
+        if self._segments_writer is None or not confirm:
+            return
+        quality = chunk_result.get("quality") or {}
+        self._segments_writer.append(
+            build_record(
+                start=confirm[0].start,
+                end=confirm[-1].end,
+                text="".join(word.text for word in confirm).strip(),
+                state="committed",
+                avg_logprob=quality.get("avg_logprob"),
+                no_speech_prob=quality.get("no_speech_prob"),
+                compression_ratio=quality.get("compression_ratio"),
+            )
+        )
 
     def _append_to_file(self, text: str) -> None:
         if self._file is None:

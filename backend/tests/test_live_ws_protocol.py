@@ -97,7 +97,7 @@ class LiveWsProtocolTest(unittest.TestCase):
 
         これが止まると uvicorn の keepalive で切断され、旧実装の 1011 が再発する。
         """
-        def slow(pcm, model, debug_save=False, sample_rate=SAMPLE_RATE):
+        def slow(pcm, model, debug_save=False, sample_rate=SAMPLE_RATE, **_kwargs):
             time.sleep(1.2)
             return stub_result()
 

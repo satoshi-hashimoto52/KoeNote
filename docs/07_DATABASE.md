@@ -32,10 +32,11 @@ ORM、テーブル定義、スキーマ、マイグレーションはこのプ�
 <saveFolder>/<YYYYMMDD>_<safe_title>[_NN]/
 ├── session.json                 # メタデータ
 ├── transcript.txt               # 文字起こし本文
-├── transcript_segments.json     # セグメント情報
-├── diagnostics.log              # 異常記録
+├── transcript_segments.jsonl    # セグメントの逐次追記（0019）
+├── transcript_segments.json     # セグメント情報（停止時に .jsonl からまとめ直す）
+├── diagnostics.log              # 異常記録・入力レベルの集計
 └── audio/
-    └── recording.wav            # 録音音声（PCM16LE mono 16kHz）
+    └── recording.wav            # 録音音声（PCM16LE mono 16kHz）※無補正の生音声
 ```
 
 フォルダ名が衝突した場合は `_01`, `_02` … と連番が付きます
@@ -59,9 +60,46 @@ ORM、テーブル定義、スキーマ、マイグレーションはこのプ�
 書き込みは `write_text_file` 経由で、`json.dumps(..., ensure_ascii=False, indent=2)` に
 改行を付けた形式です。
 
-> `docs/issues/0004-transcript-segments-json-missing.md` に、
-> `segments_path` が指すファイルが生成されない事象が「未調査（仕様確認が必要）」として
-> 記録されています。
+### transcript_segments.json（0019 / 旧 #0004）
+
+以前は `session.json` が宣言するだけで、このファイルを書き出すコードが存在しませんでした。
+0019 で**宣言どおり実際に書き出す**方へ統一しています。
+
+保存方式:
+
+1. 確定のたびに `transcript_segments.jsonl` へ **1 行 1 JSON** で追記する（O(1)）
+2. 20 行ごとに `fsync` する（強制終了時の欠損はここまで）
+3. セッション確定時に `transcript_segments.json`（配列形式）へまとめ直す
+
+全件をメモリに保持しないため、長時間録音でもメモリを圧迫しません。
+`finalize()` を呼べずに落ちたセッションは
+`services.segments_writer.rebuild_from_jsonl()` で復旧できます。
+壊れた行（強制終了で途中まで書かれた最終行など）は捨てて、読める分だけ復元します。
+
+1 レコードの内容:
+
+| キー | 型 | 説明 |
+|---|---|---|
+| `start` / `end` | number | **セッション基準の絶対経過秒** |
+| `text` | string | 発話テキスト |
+| `state` | string | 常に `"committed"`。partial は保存しない（確定前に内容が変わるため） |
+| `avg_logprob` | number | 認識品質。取得できたときだけ |
+| `no_speech_prob` | number | 同上 |
+| `compression_ratio` | number | 同上 |
+
+確定は word 単位で行いますが、1 語 1 行では実用にならないため
+**1 回の確定バッチ = 1 レコード**とします。`transcript.txt` への追記単位と一致するので、
+2 つのファイルの内容がずれません。品質指標は窓内の採用セグメントのうち
+「最も悪い側」の値を残し、事後解析で疑わしい区間を絞り込めるようにしています。
+
+### 録音 WAV は無補正（0019）
+
+`audio/recording.wav` には**音量補正を一切適用しません**。
+補正は `LiveSession.append_pcm()` の中だけで行い、Whisper へ渡す解析用バッファにのみ効きます
+（`backend/routes/whisper.py` は `recorder.append()` へ受信した生バイトをそのまま渡す）。
+
+事後の再解析・再救済のために原本を壊さないための不変条件であり、
+`backend/tests/test_live_ws_raw_audio.py` が実経路で固定しています。
 
 ### 録音 WAV
 

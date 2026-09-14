@@ -55,8 +55,8 @@ npm run package:mac      # .app / .dmg / .zip を release/ へ出力
 
 ```bash
 npm run typecheck     # tsc --noEmit
-npm run test:unit     # Vitest（TS 15 ファイル / 235 件）
-npm run test:backend  # unittest（Python 12 ファイル / 106 件）
+npm run test:unit     # Vitest（TS 22 ファイル / 361 件）
+npm run test:backend  # unittest（Python 18 ファイル / 215 件）
 ```
 
 **Lint コマンドは存在しません。** ESLint / Prettier の設定もありません。
@@ -95,7 +95,7 @@ npm run test:backend  # unittest（Python 12 ファイル / 106 件）
 
 ### 履歴として維持する（機械的な一括置換をしない）
 
-- `docs/issues/0001`〜`0015`
+- `docs/issues/0001`〜`0019`
 - `docs/manual-acceptance-long-transcription.md`
 - `docs/migration_analysis.md`
 
@@ -141,6 +141,9 @@ npm run test:backend  # unittest（Python 12 ファイル / 106 件）
 | **Renderer に権限を与えない** | `contextIsolation` / `sandbox` 有効、公開 IPC は明示列挙のみ、外部 URL は許可ホストのみ |
 | **UI ロジックを純関数へ出す** | 高さ計算・ボタン表示・停滞判定・設定移行・デバイス解決・通知分類・不透明度はすべてテスト可能な純関数 |
 | **保存値を鵜呑みにしない** | `deviceId` は origin ごとにソルトされるため、必ず現在の一覧と照合する（0016） |
+| **原本を壊さない** | `recording.wav` は無補正の生音声。音量補正は解析用バッファにしか掛けない（0019） |
+| **固定しきい値で音声を捨てない** | 固定 `MIN_RMS` は遠方発話の 79% を破棄した。判定は入力のノイズフロア基準で相対化する（0019） |
+| **捨てた事実を必ず残す** | 「正常な無音」であってもスキップ秒数は診断へ計上する。隠すと欠落に気付けない（0019） |
 | **勝手に恒久設定へ書き戻さない** | フォールバックしただけでは保存しない。ユーザーが設定画面で保存したときだけ永続化する |
 | **設定ファイルの書き手は main だけ** | Renderer と main が競合して書き換えない |
 
@@ -181,8 +184,7 @@ node scripts/responsive_check.cjs
 | 0001 segment 境界でのテキスト欠落・重複 | 対応中 |
 | 0002 停止時に未送信の PCM が破棄される | 未対応 |
 | 0003 AudioWorklet の書きかけフレーム未フラッシュ | 未対応 |
-| 0004 `segments_path` が指すファイルが生成されない | 未調査 |
-| 0005 入力デバイスの誤選択に気付けない | 未対応（改善提案） |
+| 0005 入力デバイスの誤選択に気付けない | 未対応（改善提案。0019 で一部緩和） |
 | 0014 `session.json` が done になった後も WAV 処理が続く | 未調査 |
 
 ## 関連ドキュメント

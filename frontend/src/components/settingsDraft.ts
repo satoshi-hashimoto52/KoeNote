@@ -9,6 +9,14 @@
  * 同じ物理デバイスを引き当て直すために使う。
  */
 
+import {
+  DEFAULT_PROFILE,
+  normalizeProfile,
+  normalizeProfileMap,
+  rememberProfile,
+  type InputProfileMap,
+  type InputProfileSettings
+} from '../features/audio/inputProfile';
 import { normalizeWindowOpacity } from './windowOpacity';
 
 export type LiveModelValue = 'tiny' | 'base' | 'small' | 'medium';
@@ -24,6 +32,15 @@ export interface CaptureSettings {
   delayMode: LiveDelayValue;
   /** ウィンドウの不透明度 0.70〜1.00。0018 で追加。旧設定に無ければ 1.00。 */
   windowOpacity: number;
+  /**
+   * 入力音量まわりの設定。0019 で追加。旧設定には無いので既定プリセットで補う。
+   * 実際に使う値はデバイスごとの `inputProfiles` から解決する。
+   */
+  audio: InputProfileSettings;
+  /** デバイスラベル -> 設定。0019 で追加。 */
+  inputProfiles: InputProfileMap;
+  /** 詳細設定セクションを開いているか。0019 で追加。 */
+  showAdvancedAudio: boolean;
 }
 
 /** マイGPT として許可する URL の接頭辞。既存の検証をそのまま使う。 */
@@ -51,7 +68,10 @@ export function hasChanges(current: CaptureSettings, draft: CaptureSettings): bo
     current.deviceLabel !== draft.deviceLabel ||
     current.model !== draft.model ||
     current.delayMode !== draft.delayMode ||
-    current.windowOpacity !== draft.windowOpacity
+    current.windowOpacity !== draft.windowOpacity ||
+    current.showAdvancedAudio !== draft.showAdvancedAudio ||
+    JSON.stringify(current.audio) !== JSON.stringify(draft.audio) ||
+    JSON.stringify(current.inputProfiles) !== JSON.stringify(draft.inputProfiles)
   );
 }
 
@@ -111,12 +131,71 @@ export function commitDraft(
   errors: DraftErrors = {}
 ): CaptureSettings {
   if (recording || hasErrors(errors)) return { ...current };
+  const audio = normalizeProfile(draft.audio, draft.deviceLabel);
   return {
     ...draft,
     gptUrl: normalizeGptUrl(draft.gptUrl),
     saveFolder: String(draft.saveFolder ?? '').trim(),
     // 不正値が設定ファイルへ入らないよう、保存時にも必ず通す。
-    windowOpacity: normalizeWindowOpacity(draft.windowOpacity)
+    windowOpacity: normalizeWindowOpacity(draft.windowOpacity),
+    audio,
+    // 選択中のデバイスの設定を覚える。他のデバイスの設定は触らない（0019）。
+    inputProfiles: rememberProfile(
+      normalizeProfileMap(draft.inputProfiles),
+      draft.deviceLabel,
+      audio
+    )
+  };
+}
+
+/**
+ * 保存済み設定から音声設定を読み出す（0019）。
+ *
+ * 新しいキーが無い旧設定でも壊れないよう、必ず既定プリセットで補う。
+ * デバイス別設定があればそれを優先し、無ければデバイス名から判定し直す。
+ * **フォールバック先へ旧デバイスの設定を引き継がない。**
+ */
+export function readAudioSettings(
+  raw: Record<string, unknown> | null | undefined,
+  deviceLabel: string
+): { audio: InputProfileSettings; inputProfiles: InputProfileMap; showAdvancedAudio: boolean } {
+  const source = raw ?? {};
+  const inputProfiles = normalizeProfileMap(source.inputProfiles);
+  const label = String(deviceLabel ?? '').trim();
+  const saved = label ? inputProfiles[label] : undefined;
+  const base = saved ?? {
+    inputMode: source.inputMode,
+    gainMode: source.gainMode,
+    manualGainDb: source.manualGainDb,
+    maxGainDb: source.maxGainDb,
+    silenceMode: source.silenceMode,
+    manualSilenceRms: source.manualSilenceRms,
+    lowInputWarning: source.lowInputWarning,
+    lowInputWarningSeconds: source.lowInputWarningSeconds
+  };
+  const audio = saved || Object.values(base).some((value) => value !== undefined)
+    ? normalizeProfile(base as Record<string, unknown>, label)
+    : { ...DEFAULT_PROFILE };
+  return {
+    audio,
+    inputProfiles,
+    showAdvancedAudio: source.showAdvancedAudio === true
+  };
+}
+
+/** 保存する音声設定のキー。設定ファイルへ書き戻すときに使う。 */
+export function audioSettingsToStorage(settings: CaptureSettings): Record<string, unknown> {
+  return {
+    inputMode: settings.audio.inputMode,
+    gainMode: settings.audio.gainMode,
+    manualGainDb: settings.audio.manualGainDb,
+    maxGainDb: settings.audio.maxGainDb,
+    silenceMode: settings.audio.silenceMode,
+    manualSilenceRms: settings.audio.manualSilenceRms,
+    lowInputWarning: settings.audio.lowInputWarning,
+    lowInputWarningSeconds: settings.audio.lowInputWarningSeconds,
+    inputProfiles: settings.inputProfiles,
+    showAdvancedAudio: settings.showAdvancedAudio
   };
 }
 

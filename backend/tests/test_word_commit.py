@@ -43,6 +43,16 @@ def loud_frame(samples: int = FRAME_SAMPLES) -> bytes:
     return np.full(samples, 8000, dtype="<i2").tobytes()
 
 
+def silent_frame(samples: int = FRAME_SAMPLES) -> bytes:
+    """本当に音が無いフレーム。
+
+    0019 以降、無音判定は stub が返す rms ではなく実 PCM のフレームレベルで
+    行われる。台本の tail_silence を「無音」として扱わせるには、実際に
+    無音の PCM を流し込む必要がある。
+    """
+    return np.zeros(samples, dtype="<i2").tobytes()
+
+
 @dataclass(frozen=True)
 class ScriptWord:
     wid: int          # 検証専用。本番コードへは渡さない
@@ -56,6 +66,8 @@ class Script:
 
     def __init__(self, words: list, tail_silence: float = 1.0):
         self.words = words
+        self.tail_silence = tail_silence
+        self.speech_end = words[-1].end if words else 0.0
         self.total = words[-1].end + tail_silence if words else tail_silence
 
     @property
@@ -138,7 +150,7 @@ class Harness:
 
         self.session._infer_range = infer
 
-    def _stub(self, pcm, model, debug_save=False, sample_rate=SAMPLE_RATE):
+    def _stub(self, pcm, model, debug_save=False, sample_rate=SAMPLE_RATE, **_kwargs):
         start_sample, end_sample = self._range["value"]
         self.window_index += 1
         if self.window_index in self.fail_windows:
@@ -167,8 +179,10 @@ class Harness:
         session = self.session
         with patch("services.live_session.transcribe_pcm16", new=self._stub):
             frames = int(self.script.total * SAMPLE_RATE / FRAME_SAMPLES) + 2
-            for _ in range(frames):
-                session.append_pcm(loud_frame())
+            speech_frames = int(self.script.speech_end * SAMPLE_RATE / FRAME_SAMPLES)
+            for index in range(frames):
+                # 台本の発話が終わったあとは実際に無音を流す（0019）。
+                session.append_pcm(loud_frame() if index < speech_frames else silent_frame())
                 while True:
                     plan = session.plan_window()
                     if plan is None:

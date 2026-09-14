@@ -11,6 +11,12 @@ import {
   updateDraft,
   validateDraft
 } from './settingsDraft';
+import { DEFAULT_PROFILE, normalizeProfile } from '../features/audio/inputProfile';
+
+// 0019 で audio / inputProfiles / showAdvancedAudio が増えた。
+// commitDraft は選択中デバイスの設定を inputProfiles へ書き戻すので、
+// 固定値の側にも同じ内容を持たせておく（保存が冪等であることの確認にもなる）。
+const audio = normalizeProfile(DEFAULT_PROFILE, 'マイク A');
 
 const current: CaptureSettings = {
   gptUrl: 'https://chatgpt.com/g/g-old',
@@ -19,7 +25,10 @@ const current: CaptureSettings = {
   deviceLabel: 'マイク A',
   model: 'small',
   delayMode: 'balanced',
-  windowOpacity: 1
+  windowOpacity: 1,
+  audio,
+  inputProfiles: { 'マイク A': { ...audio } },
+  showAdvancedAudio: false
 };
 
 describe('0015: 設定モーダルの下書き', () => {
@@ -55,9 +64,10 @@ describe('0015: 設定モーダルの下書き', () => {
   });
 
   // 0016 で deviceLabel を追加した（origin 変更で deviceId が無効になるため）。
-  it('保存キーは 7 つ（0016 deviceLabel / 0018 windowOpacity）', () => {
+  it('保存キーは 10 つ（0016 deviceLabel / 0018 windowOpacity / 0019 音声設定）', () => {
     expect(Object.keys(createDraft(current)).sort()).toEqual([
-      'delayMode', 'deviceId', 'deviceLabel', 'gptUrl', 'model', 'saveFolder', 'windowOpacity'
+      'audio', 'delayMode', 'deviceId', 'deviceLabel', 'gptUrl', 'inputProfiles',
+      'model', 'saveFolder', 'showAdvancedAudio', 'windowOpacity'
     ]);
   });
 
@@ -100,7 +110,14 @@ describe('0015: 設定モーダルの下書き', () => {
       deviceLabel: 'マイク B',
       model: 'medium',
       delayMode: 'accuracy',
-      windowOpacity: 1
+      windowOpacity: 1,
+      // 0019: デバイスを変えたぶん、そのデバイス用のプリセットが解決されて保存される。
+      audio: normalizeProfile(audio, 'マイク B'),
+      inputProfiles: {
+        'マイク A': { ...audio },
+        'マイク B': normalizeProfile(audio, 'マイク B')
+      },
+      showAdvancedAudio: false
     });
   });
 
@@ -139,7 +156,10 @@ describe('0015: 設定の検証', () => {
     deviceLabel: '',
     model: 'small',
     delayMode: 'balanced',
-    windowOpacity: 1
+    windowOpacity: 1,
+    audio: { ...DEFAULT_PROFILE },
+    inputProfiles: {},
+    showAdvancedAudio: false
   };
 
   it('正しい値ならエラーなし', () => {

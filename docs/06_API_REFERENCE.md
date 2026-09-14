@@ -17,7 +17,10 @@
 | POST | `/api/session/finalize` | `backend/routes/session.py:69` |
 | POST | `/api/session/diagnostics` | `backend/routes/session.py:79` |
 | POST | `/api/session/repair_audio` | `backend/routes/session.py:92` |
-| WS | `/ws/live` | `backend/routes/whisper.py:671` |
+| GET | `/api/audio/presets` | `backend/routes/audio.py`（0019） |
+| GET | `/api/audio/detect_mode` | `backend/routes/audio.py`（0019） |
+| POST | `/api/audio/analyze` | `backend/routes/audio.py`（0019） |
+| WS | `/ws/live` | `backend/routes/whisper.py` |
 
 CORS は `allow_origins=["*"]`, `allow_methods=["*"]`, `allow_headers=["*"]` です
 （`backend/main.py`。コメント: 「ローカルの Vite / Electron からのみアクセスされる想定」）。
@@ -315,7 +318,25 @@ CORS は `allow_origins=["*"]`, `allow_methods=["*"]`, `allow_headers=["*"]` で
 | `send_mode` | string | `"chunks"` | `"pcm16"` を使う。`"full"` は**拒否される** |
 | `sample_rate` | int | `16000` | 8000〜192000 にクランプ |
 | `debug` | boolean | `false` | |
+| `device_label` | string | `""` | 入力モードの自動判定に使う（0019） |
+| `input_profile` | object | — | 入力モードとプリセット（0019）。下表 |
 | `resume_session_id` | string | — | 再接続時に指定 |
+
+`input_profile` のフィールド（`services/input_profile.build_profile`）:
+
+| フィールド | 型 | 既定 | 備考 |
+|---|---|---|---|
+| `mode` | string | `"auto"` | `auto` / `mic` / `loopback` / `custom` |
+| `device_label` | string | `""` | `auto` の判定に使う |
+| `gain_mode` | string | プリセット | `auto` / `none` / `manual`。`custom` 以外はプリセット優先 |
+| `manual_gain_db` | float | `0` | 0〜24 にクランプ |
+| `max_gain_db` | float | `24` | 0〜24 にクランプ |
+| `silence_mode` | string | プリセット | `relative` / `absolute` / `manual` |
+| `manual_silence_rms` | float | `0.0002` | 0〜0.05 にクランプ |
+| `low_input_warning` | boolean | `true` | モードを問わずユーザー設定を尊重 |
+| `low_input_warning_seconds` | float | `20` | 5〜120 にクランプ |
+
+不正値・未知の値はすべてプリセットへフォールバックします（例外は投げません）。
 
 > `send_mode: "full"` はサーバが
 > `"send_mode='full' は O(T^2) のため realtime では使用しません。'pcm16' を使ってください。"`
@@ -336,8 +357,27 @@ PCM16LE mono のフレーム。フォーマットは `sample_rate`（既定 1600
 | `update` | 確定テキストの差分 |
 | `result` | 窓ごとの結果 |
 | `metrics` | 窓の統計（`rms`, `inference_ms`, `lag_seconds`, `dropped_seconds` 等） |
-| `heartbeat` | 生存通知と進捗 |
+| `heartbeat` | 生存通知と進捗。`input_levels` を含む（0019） |
+| `input_level_state` | 入力レベルの状態が変わったときだけ届く（0019） |
 | `log` | ログ行 |
+
+`ready` / `resumed` は解決済みの `input_profile`（`mode` / `detected_mode` /
+`requested_mode` / `gain_enabled` など）を含みます。auto の判定結果を UI へ出すためです。
+
+`heartbeat.input_levels` と `input_level_state.input_levels`:
+
+| フィールド | 説明 |
+|---|---|
+| `input_mode` / `detected_mode` / `gain_mode` | 解決されたモード |
+| `gain_db` | 現在掛かっているゲイン（dB） |
+| `noise_floor_dbfs` / `speech_threshold_dbfs` | ノイズフロアと発話判定しきい値（**dBFS**） |
+| `level_skipped_seconds` / `level_skipped_ratio` | レベル判定で推論へ回さなかった秒数と割合 |
+| `vad_silence_seconds` | 推論はしたが発話が採れなかった秒数 |
+| `repetitive_dropped_count` | 反復ハルシネーションとして破棄した segment 数 |
+| `level_state` | `ok` / `silent_ok` / `no_input` / `too_quiet` / `low_snr` / `clipping` |
+
+`level_state` は**瞬時状態**です。「何秒続いたら警告するか」は frontend が決めます
+（`features/audio/lowVolumeWarning.ts`）。
 | `warning` | 警告 |
 | `error` | エラー |
 | `session_final` | 停止後の最終テキスト |
@@ -355,3 +395,91 @@ PCM16LE mono のフレーム。フォーマットは `sample_rate`（既定 1600
 | `sample_rate` | `16000` |
 | `chunk_seconds` / `overlap_seconds` | 窓の設定 |
 | `heartbeat_interval_seconds` | ハートビート間隔 |
+
+---
+
+## GET `/api/audio/presets`
+
+入力方式別プリセットと設計値を返します（0019）。UI の初期値と説明文の根拠に使います。
+
+```json
+{
+  "unit": "dBFS",
+  "input_modes": ["auto", "mic", "loopback", "custom"],
+  "gain_modes": ["auto", "none", "manual"],
+  "silence_modes": ["relative", "absolute", "manual"],
+  "presets": { "mic": {...}, "loopback": {...} },
+  "limits": {
+    "max_gain_db": 24.0,
+    "target_speech_dbfs": -24.0,
+    "speech_over_floor_db": 9.0,
+    "absolute_silence_rms": 0.0002,
+    "min_warning_seconds": 5.0,
+    "max_warning_seconds": 120.0,
+    "default_warning_seconds": 20.0
+  },
+  "calibration": {
+    "noise_step_seconds": 5.0,
+    "speech_step_seconds": 18.0,
+    "test_sentence": "これはKoeNoteのマイク入力テストです。\n…",
+    "transcribable_dbfs": -36.0
+  }
+}
+```
+
+---
+
+## GET `/api/audio/detect_mode`
+
+| パラメータ | 型 | 説明 |
+|---|---|---|
+| `device_label` | string | 入力デバイス名 |
+
+```json
+{ "device_label": "BlackHole 2ch", "detected_mode": "loopback" }
+```
+
+---
+
+## POST `/api/audio/analyze`
+
+入力テスト（キャリブレーション）の解析（0019）。
+
+**会議セッションを一切作らず、受け取った PCM も保存しません**（メモリ上でのみ扱う）。
+
+リクエスト:
+
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `speech_pcm` | string | ○ | 遠方発話ステップの PCM16LE mono を base64 で |
+| `noise_pcm` | string | | 環境音ステップの PCM16LE mono を base64 で |
+| `device_label` | string | | 入力デバイス名 |
+| `input_profile` | object | | 現在の設定（`/ws/live` の `input_profile` と同形式） |
+| `sample_rate` | int | | 既定 16000。8000〜192000 |
+
+PCM は 1 つあたり 5MB まで。超えると `400` を返します。
+
+レスポンス（抜粋。数値はすべて **dBFS** / SNR は相対量の dB）:
+
+| フィールド | 説明 |
+|---|---|
+| `unit` | 常に `"dBFS"` |
+| `input_mode` / `detected_mode` | 解決されたモードと自動判定結果 |
+| `noise_floor_dbfs` | ノイズフロア |
+| `speech_median_dbfs` / `speech_low_dbfs` / `speech_peak_dbfs` | 発話レベルの中央値 / 下位20% / ピーク |
+| `snr_db` | 発話レベル代表値 − ノイズフロア |
+| `current_pass_ratio` / `current_skip_ratio` | 現在設定での推定通過率 / スキップ率 |
+| `recommended_gain_db` / `recommended_pass_ratio` | 推奨ゲインと、それを適用したときの推定通過率 |
+| `required_gain_db` | 上限で頭打ちにしない、本来必要なゲイン |
+| `clipping_risk` | `low` / `medium` / `high` |
+| `verdict` | `good` / `usable` / `needs_adjust` / `too_quiet` / `noisy` / `clipping` / `no_input` |
+| `recommended_settings` | 「推奨設定を適用」で書き戻す設定キー |
+
+エラー:
+
+| 状況 | ステータス |
+|---|---|
+| `speech_pcm` が空 | 400 |
+| base64 として読めない | 400 |
+| PCM が 5MB を超える | 400 |
+| `sample_rate` が範囲外 | 400 |

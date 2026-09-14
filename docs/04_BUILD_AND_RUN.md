@@ -106,8 +106,8 @@ shasum -a 256 -c SHA256SUMS.txt
 
 | 対象 | ファイル数 | テスト件数 |
 |---|---|---|
-| TypeScript（Vitest） | 15 | **235** |
-| Python（`unittest`） | 12 | **106** |
+| TypeScript（Vitest） | 22 | **361** |
+| Python（`unittest`） | 18 | **215** |
 
 TypeScript:
 
@@ -123,6 +123,13 @@ TypeScript:
 `frontend/src/features/transcription/acquireStream.test.ts`,
 `frontend/src/features/transcription/inputDevice.test.ts`,
 `frontend/src/features/transcription/watchdog.test.ts`,
+`frontend/src/features/audio/inputProfile.test.ts`,
+`frontend/src/features/audio/levelMeter.test.ts`,
+`frontend/src/features/audio/lowVolumeWarning.test.ts`,
+`frontend/src/features/audio/calibration.test.ts`,
+`frontend/src/features/audio/layout.test.ts`,
+`frontend/src/features/audio/warningSeparation.test.ts`,
+`electron/ipc/atomicJson.test.ts`,
 `frontend/src/services/requestText.test.ts`
 
 Python（`backend/tests/`）:
@@ -130,7 +137,15 @@ Python（`backend/tests/`）:
 `test_attachments_removed.py`, `test_live_session.py`, `test_live_session_pcm.py`,
 `test_live_ws_protocol.py`, `test_no_speech_filter.py`, `test_pcm_stream.py`,
 `test_resolve_python_frozen.py`, `test_wav_recorder.py`, `test_whisper_routes.py`,
-`test_whisper_runner.py`, `test_whisper_transcriber.py`, `test_word_commit.py`
+`test_whisper_runner.py`, `test_whisper_transcriber.py`, `test_word_commit.py`,
+`test_input_gain.py`, `test_live_session_levels.py`, `test_live_ws_raw_audio.py`,
+`test_segments_writer.py`, `test_temperature_fallback.py`, `test_calibration_routes.py`
+
+> `test_input_gain.py` の fixture は**合成音声**です。実録音はリポジトリへ入れません
+> （機密情報を含みうるため）。0019 で実測した特徴——ノイズフロア -62 dBFS /
+> 発話 -38 dBFS / SNR 24 dB / 10 秒窓の平均 RMS が旧 `MIN_RMS 0.006` 未満——だけを
+> 再現しています。`test_live_session_levels.py` と `test_calibration_routes.py` は
+> この fixture を共用します。
 
 ## lint
 

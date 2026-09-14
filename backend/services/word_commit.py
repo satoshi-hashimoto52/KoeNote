@@ -86,6 +86,9 @@ class DegradeReason:
     DRAIN_UNRECOVERED = "drain_unrecovered"              # 回収できなかった音声が残った
     WINDOW_YIELDED_NOTHING = "window_yielded_nothing"    # 窓が確定語を1つも出さなかった
     AUDIO_LEFT_UNTRANSCRIBED = "audio_left_untranscribed"  # 再試行しても文字化できず先へ進めた
+    # 0019
+    REPETITIVE_SEGMENT_DROPPED = "repetitive_segment_dropped"  # 反復ハルシネーションを破棄した
+    LOW_INPUT_LEVEL = "low_input_level"                  # 入力レベル不足を検知した
 
 
 # ---------------------------------------------------------------------------
@@ -136,8 +139,15 @@ class WindowCounters:
     cursor_min_advance_count: int = 0
     drain_window_count: int = 0
     unrecovered_seconds: float = 0.0
-    # whisper が窓の一部を文字化しなかったため、再試行しても確定できなかった秒数。
+    # --- 「文字にならなかった秒数」の 3 分類（0019 で意味を整理した） ---
+    # 1. レベル判定で推論へ回さなかった秒数。正常な無音でも必ず計上する。
+    level_skipped_seconds: float = 0.0
+    # 2. 推論はしたが Silero VAD / 品質判定で発話が採れなかった秒数。
+    vad_silence_seconds: float = 0.0
+    # 3. 推論もしたが whisper が窓の一部を文字化せず、再試行も尽きた秒数（従来の意味）。
     untranscribed_seconds: float = 0.0
+    # 反復ハルシネーションとして確定テキストから外した segment 数。
+    repetitive_dropped_count: int = 0
     # アンカー不一致時に使う中点フォールバックの発生回数と、その結果。
     midpoint_fallback_count: int = 0
     midpoint_dropped_words: int = 0
@@ -155,7 +165,10 @@ class WindowCounters:
             "cursor_min_advance_count": self.cursor_min_advance_count,
             "drain_window_count": self.drain_window_count,
             "unrecovered_seconds": round(self.unrecovered_seconds, 2),
+            "level_skipped_seconds": round(self.level_skipped_seconds, 2),
+            "vad_silence_seconds": round(self.vad_silence_seconds, 2),
             "untranscribed_seconds": round(self.untranscribed_seconds, 2),
+            "repetitive_dropped_count": self.repetitive_dropped_count,
             "midpoint_fallback_count": self.midpoint_fallback_count,
             "midpoint_dropped_words": self.midpoint_dropped_words,
             "midpoint_kept_words": self.midpoint_kept_words,

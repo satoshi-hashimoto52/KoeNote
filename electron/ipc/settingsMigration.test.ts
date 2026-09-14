@@ -10,7 +10,18 @@ const legacy = {
   delayMode: 'balanced',
   requestTemplate: '要約してください',
   transcriptHeight: 480,
-  windowOpacity: 0.85
+  windowOpacity: 0.85,
+  // 0019 で追加。旧 BridgeLog には無いが、KoeNote 間の引き継ぎでは意味を持つ。
+  inputMode: 'auto',
+  gainMode: 'auto',
+  manualGainDb: 0,
+  maxGainDb: 24,
+  silenceMode: 'relative',
+  manualSilenceRms: 0.0002,
+  lowInputWarning: true,
+  lowInputWarningSeconds: 20,
+  inputProfiles: { 'マイク A': { inputMode: 'mic' } },
+  showAdvancedAudio: false
 };
 
 describe('planSettingsMigration', () => {
@@ -34,6 +45,26 @@ describe('planSettingsMigration', () => {
     const migrated = planSettingsMigration({}, legacyWithoutLabel)!;
     expect(migrated).not.toHaveProperty('deviceLabel');
     expect(migrated.deviceId).toBe('device-abc');
+  });
+
+  it('音声設定が無い旧設定でも移行できる（0019 後方互換）', () => {
+    const {
+      inputMode: _a, gainMode: _b, manualGainDb: _c, maxGainDb: _d,
+      silenceMode: _e, manualSilenceRms: _f, lowInputWarning: _g,
+      lowInputWarningSeconds: _h, inputProfiles: _i, showAdvancedAudio: _j,
+      ...legacyWithoutAudio
+    } = legacy;
+    const migrated = planSettingsMigration({}, legacyWithoutAudio)!;
+    expect(migrated).not.toHaveProperty('inputMode');
+    expect(migrated).not.toHaveProperty('inputProfiles');
+    expect(migrated.model).toBe('small');
+  });
+
+  it('音声設定があれば引き継ぐ（0019）', () => {
+    const migrated = planSettingsMigration({}, legacy)!;
+    expect(migrated.inputMode).toBe('auto');
+    expect(migrated.maxGainDb).toBe(24);
+    expect(migrated.inputProfiles).toEqual({ 'マイク A': { inputMode: 'mic' } });
   });
 
   it('移行対象のキーをすべて引き継ぐ', () => {

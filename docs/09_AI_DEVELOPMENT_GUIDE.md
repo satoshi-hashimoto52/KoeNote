@@ -119,8 +119,8 @@ npm run test:backend  # unittest（backend/tests/）
 
 | 対象 | 場所 | 命名 | 現在の件数 |
 |---|---|---|---|
-| TypeScript | 実装と同じディレクトリ | `<対象>.test.ts` | 15 ファイル / **235 件** |
-| Python | `backend/tests/` | `test_<対象>.py` | 12 ファイル / **106 件** |
+| TypeScript | 実装と同じディレクトリ | `<対象>.test.ts` | 22 ファイル / **361 件** |
+| Python | `backend/tests/` | `test_<対象>.py` | 18 ファイル / **215 件** |
 
 時間に依存するロジックは Vitest の fake timers を使い、実時間を待ちません
 （例: `uiNotice.test.ts` の 8 秒自動消去）。
@@ -187,7 +187,6 @@ git status --short
 | 0001 segment 境界でのテキスト欠落・重複 | 対応中 |
 | 0002 停止時に未送信の PCM が破棄される | 未対応 |
 | 0003 AudioWorklet の書きかけフレーム未フラッシュ | 未対応 |
-| 0004 `segments_path` が指すファイルが生成されない | 未調査（仕様確認が必要） |
 | 0005 入力デバイスの誤選択に気付けない | 未対応（改善提案） |
 | 0014 `session.json` が done になった後も WAV 処理が続く | 未調査 |
 

@@ -16,6 +16,14 @@ import {
 } from './ipc/handlers';
 
 const isDev = process.env.NODE_ENV === 'development';
+/**
+ * 開発時に読み込む Vite dev サーバのポート。
+ *
+ * 既定は Vite の標準ポート 5173。同じマシンで別プロジェクトの dev サーバが
+ * 5173 を使っていると起動できないため、環境変数で逃がせるようにする
+ * （`KOENOTE_PORT` と同じ流儀。他プロジェクトを止めずに並行して動かすため）。
+ */
+const DEV_SERVER_PORT = Number(process.env.KOENOTE_DEV_SERVER_PORT || 5173);
 let mainWindow: BrowserWindow | null = null;
 let isRecording = false;
 let quitting = false;
@@ -50,7 +58,10 @@ function createWindow(): void {
     minHeight: 480,
     backgroundColor: '#09090B',
     titleBarStyle: 'hiddenInset',
-    title: 'KoeNote',
+    // 開発版と配布版を取り違えないよう、タイトルで区別する。
+    // 同じマシンで両方を同時に起動して検証することがあるため
+    // （配布版は 8765、開発版は KOENOTE_PORT で別ポート）。
+    title: isDev ? `KoeNote [開発版:${process.env.KOENOTE_PORT || 8765}]` : 'KoeNote',
     show: false,
     webPreferences: {
       preload: join(__dirname, 'preload.cjs'),
@@ -69,7 +80,7 @@ function createWindow(): void {
   mainWindow.once('ready-to-show', () => mainWindow?.show());
 
   if (isDev) {
-    mainWindow.loadURL('http://localhost:5173');
+    mainWindow.loadURL(`http://localhost:${DEV_SERVER_PORT}`);
   } else {
     mainWindow.loadFile(join(__dirname, '..', '..', 'frontend', 'dist', 'index.html'));
   }

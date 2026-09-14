@@ -25,6 +25,7 @@
 | 変数 | 既定値 | 用途 | 定義箇所 |
 |---|---|---|---|
 | `KOENOTE_PORT` | `8765` | Backend の待受ポート | `electron/backend.ts:9`, `electron/preload.ts:5-6` |
+| `KOENOTE_DEV_SERVER_PORT` | `5173` | 開発時に読み込む Vite dev サーバのポート。他プロジェクトの dev サーバと衝突したときに逃がす（開発専用。配布版では未使用） | `electron/main.ts` |
 | `KOENOTE_PYTHON` | なし（`python3` へフォールバック） | 使用する Python の絶対パス | `electron/backend.ts:56`, `backend/services/transcriber.py:17` |
 | `KOENOTE_FFMPEG_DIR` | なし | ffmpeg/ffprobe を含むディレクトリ | `electron/backend.ts:77-78`, `backend/services/transcriber.py:18` |
 | `KOENOTE_MODEL_PATH` | なし | モデルファイルの絶対パス | `backend/services/transcriber.py:15` |
@@ -68,6 +69,16 @@
 | `requestTemplate` | string | `''` | 空なら組み込みテンプレートを使用 |
 | `transcriptHeight` | number \| null | `null` | 未設定時は 320 を使う |
 | `windowOpacity` | number | `1.00` | ウィンドウの不透明度。**0018 で追加** |
+| `inputMode` | string | `'auto'` | 入力モード。`auto` / `mic` / `loopback` / `custom`。**0019 で追加** |
+| `gainMode` | string | `'auto'` | 音量補正。`auto` / `none` / `manual`。**0019 で追加** |
+| `manualGainDb` | number | `0` | 手動ゲイン（dB）。0〜24。`gainMode='manual'` のみ。**0019 で追加** |
+| `maxGainDb` | number | `24` | 自動補正の上限（dB）。0〜24。**0019 で追加** |
+| `silenceMode` | string | `'relative'` | 無音判定。`relative` / `absolute` / `manual`。**0019 で追加** |
+| `manualSilenceRms` | number | `0.0002` | 手動しきい値（RMS）。0〜0.05。**0019 で追加** |
+| `lowInputWarning` | boolean | `true` | 低音量警告の ON/OFF。**0019 で追加** |
+| `lowInputWarningSeconds` | number | `20` | 警告までの継続時間（秒）。5〜120。**0019 で追加** |
+| `inputProfiles` | object | `{}` | デバイスラベル -> 設定。**0019 で追加** |
+| `showAdvancedAudio` | boolean | `false` | 設定画面の詳細設定を開いているか。**0019 で追加** |
 
 書き込みは `settings:set` IPC → 一時ファイル → `rename` のアトミック更新です。
 **設定ファイルを書くのは Electron main だけ**で、Renderer は IPC 経由でしか触れません。
@@ -92,6 +103,34 @@ Chromium は `MediaDeviceInfo.deviceId` を **origin ごとに異なる値へソ
 - `groupId` も origin 依存の可能性があるため、安定識別子として使っていません。
 
 定義: `frontend/src/features/transcription/inputDevice.ts`
+
+### 入力音声（0019）
+
+`inputMode` は「どう扱うか」の選択、`inputProfiles` は「デバイスごとに何を使うか」の保存。
+
+| 順 | 条件 | 使う設定 |
+|---|---|---|
+| 1 | `inputProfiles` に現在のデバイス名がある | その設定 |
+| 2 | 無い | **そのデバイス名から判定し直したプリセット** |
+
+2 が重要。デバイスが見つからずフォールバックしたときに、旧デバイスの設定
+（BlackHole 用の「補正なし」など）を新デバイスへ持ち込むと 0019 が再発する。
+
+`inputMode` が `custom` 以外のときは、個別キー（`gainMode` など）よりプリセットを優先する。
+モードを選び直したときに前のモードの値が残らないようにするため。
+`lowInputWarning` と `lowInputWarningSeconds` だけはモードを問わずユーザー設定を尊重する。
+
+不正値の扱い:
+
+| 状況 | 挙動 |
+|---|---|
+| キーが無い | 既定プリセットで補う |
+| 列挙値が未知 | 安全な既定へフォールバック（`gainMode` なら `auto`） |
+| 数値が範囲外 / NaN | clamp（`maxGainDb` は 0〜24、`lowInputWarningSeconds` は 5〜120） |
+| `inputProfiles` が配列や文字列 | 空オブジェクトとして扱う |
+| 設定ファイルが壊れている | 既存挙動どおり空オブジェクトを返す（0019 で変更しない） |
+
+`clip_protection`（クリッピング防止）は設定キーを持たない。常に有効で、切れない。
 
 ### ウィンドウの不透明度（windowOpacity）
 

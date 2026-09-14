@@ -17,7 +17,19 @@ export const MIGRATED_KEYS = [
   'requestTemplate',
   'transcriptHeight',
   // 0018 で追加。旧 BridgeLog 設定にあれば引き継ぐ（無ければ 1.00 扱い）。
-  'windowOpacity'
+  'windowOpacity',
+  // 0019 で追加。旧 BridgeLog 設定には無いが、KoeNote 間の引き継ぎで意味を持つ。
+  // 無ければ既定プリセット（マイク / 自動補正あり）として扱われる。
+  'inputMode',
+  'gainMode',
+  'manualGainDb',
+  'maxGainDb',
+  'silenceMode',
+  'manualSilenceRms',
+  'lowInputWarning',
+  'lowInputWarningSeconds',
+  'inputProfiles',
+  'showAdvancedAudio'
 ] as const;
 
 export type MigratedKey = (typeof MIGRATED_KEYS)[number];

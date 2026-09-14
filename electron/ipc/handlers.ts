@@ -1,9 +1,10 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron';
 import { existsSync, readFileSync } from 'node:fs';
-import { writeFile, mkdir, appendFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { appendFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { appendAppLogNotice, getBackendLog, restartBackend } from '../backend';
 import { appendDiagnosticsLine } from './diagnostics';
+import { writeJsonAtomic } from './atomicJson';
 import { isAllowedGptUrl, openGptUrl, openInChromeMac } from './openExternal';
 import { planSettingsMigration } from './settingsMigration';
 import {
@@ -62,12 +63,9 @@ export function readSettings(): Record<string, unknown> {
 }
 
 async function writeSettingsAtomic(data: Record<string, unknown>): Promise<void> {
-  const target = settingsPath();
-  await mkdir(dirname(target), { recursive: true });
-  const tmp = `${target}.tmp`;
-  await writeFile(tmp, JSON.stringify(data, null, 2), 'utf-8');
-  const { rename } = await import('node:fs/promises');
-  await rename(tmp, target);
+  // 一時ファイル名の固定と非直列化で同時書き込みが ENOENT になっていた（0019）。
+  // 詳細と再現順序は ipc/atomicJson.ts を参照。
+  await writeJsonAtomic(settingsPath(), data);
 }
 
 /** 保存済みのウィンドウ不透明度。未設定・壊れている場合は 1.00。 */

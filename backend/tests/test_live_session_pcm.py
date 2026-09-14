@@ -163,7 +163,7 @@ class CommittedDeltaTest(unittest.TestCase):
         words = ["これは", "テストです。", "次の文", "さらに続く。", "終わり"]
         counter = itertools.count()
 
-        def stub(pcm, model, debug_save=False, sample_rate=SAMPLE_RATE):
+        def stub(pcm, model, debug_save=False, sample_rate=SAMPLE_RATE, **_kwargs):
             word = words[next(counter) % len(words)]
             return {**stub_result(), "text": word,
                     "segments": [{"start": 0.0, "end": 8.0, "text": word}]}
@@ -264,7 +264,7 @@ class LongRunStabilityTest(unittest.TestCase):
         # （2時間で約300MB）。素の関数で長さだけ記録する。
         window_byte_sizes = []
 
-        def stub(pcm, model, debug_save=False, sample_rate=SAMPLE_RATE):
+        def stub(pcm, model, debug_save=False, sample_rate=SAMPLE_RATE, **_kwargs):
             window_byte_sizes.append(len(pcm))
             return stub_result()
 

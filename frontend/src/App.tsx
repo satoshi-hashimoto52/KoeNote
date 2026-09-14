@@ -9,6 +9,23 @@ import {
   normalizeWindowOpacity,
   readWindowOpacity
 } from './components/windowOpacity';
+import { audioSettingsToStorage, readAudioSettings } from './components/settingsDraft';
+import { InputLevelMeter } from './components/InputLevelMeter';
+import {
+  DEFAULT_PROFILE,
+  resolveMode,
+  type InputProfileMap,
+  type InputProfileSettings
+} from './features/audio/inputProfile';
+import { buildMeterView, createLevelSmoother } from './features/audio/levelMeter';
+import {
+  WARNING_HEADINGS,
+  beginWarning,
+  thresholdMsFrom,
+  updateWarning,
+  warningMessage,
+  type WarningState
+} from './features/audio/lowVolumeWarning';
 import { resolveRecordButton } from './components/recordButton';
 import { createNoticeGate } from './components/deviceNotice';
 import { createSessionCleanup } from './components/sessionCleanup';
@@ -118,6 +135,13 @@ export default function App() {
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  // 0019: 入力音量まわり。デバイス別設定と、録音中のメーター／警告。
+  const [audioSettings, setAudioSettings] = useState<InputProfileSettings>(DEFAULT_PROFILE);
+  const [inputProfiles, setInputProfiles] = useState<InputProfileMap>({});
+  const [showAdvancedAudio, setShowAdvancedAudio] = useState(false);
+  const [meterView, setMeterView] = useState(() => buildMeterView(-60));
+  const smootherRef = useRef(createLevelSmoother());
+  const warningRef = useRef<WarningState>(beginWarning(0));
   const [health, setHealth] = useState<{ ffmpeg_ok?: boolean; ffmpeg?: string | null } | null>(null);
   const [backendLog, setBackendLog] = useState('');
 
@@ -144,6 +168,11 @@ export default function App() {
       if (typeof s.requestTemplate === 'string') setRequestTemplate(s.requestTemplate);
       // 高さは正規化を TranscriptView 側で行う。ここでは生値を渡すだけ（0008）。
       if (s[TRANSCRIPT_HEIGHT_KEY] !== undefined) setTranscriptHeight(Number(s[TRANSCRIPT_HEIGHT_KEY]));
+      // 0019: 新しいキーが無い旧設定でも壊れないよう、必ず既定プリセットで補う。
+      const audio = readAudioSettings(s, typeof s.deviceLabel === 'string' ? s.deviceLabel : '');
+      setAudioSettings(audio.audio);
+      setInputProfiles(audio.inputProfiles);
+      setShowAdvancedAudio(audio.showAdvancedAudio);
       setSettingsLoaded(true);
     })();
   }, [bridge]);
@@ -152,13 +181,81 @@ export default function App() {
     if (!bridge || !settingsLoaded) return;
     bridge
       .setSettings({
-        gptUrl, saveFolder, deviceId, deviceLabel, model, delayMode, requestTemplate, windowOpacity
+        gptUrl, saveFolder, deviceId, deviceLabel, model, delayMode, requestTemplate, windowOpacity,
+        // 0019: 音声設定。既存キーは触らず、追加分だけを書く。
+        ...audioSettingsToStorage({
+          gptUrl, saveFolder, deviceId, deviceLabel, model, delayMode, windowOpacity,
+          audio: audioSettings, inputProfiles, showAdvancedAudio
+        })
       })
       .catch(() => {});
   }, [
     bridge, settingsLoaded, gptUrl, saveFolder, deviceId, deviceLabel,
-    model, delayMode, requestTemplate, windowOpacity
+    model, delayMode, requestTemplate, windowOpacity,
+    audioSettings, inputProfiles, showAdvancedAudio
   ]);
+
+  // --- 0019: 入力レベルの表示と低音量警告 ---
+
+  // 生の RMS を平滑化して表示用の View にする。瞬間ピークで点滅させない。
+  useEffect(() => {
+    if (!recording) {
+      smootherRef.current.reset();
+      setMeterView(buildMeterView(-60));
+      return;
+    }
+    setMeterView(smootherRef.current.push(live.inputLevel));
+  }, [live.inputLevel, recording]);
+
+  // 録音開始で警告状態を作り直す（前セッションを持ち越さない）。
+  useEffect(() => {
+    if (recording) warningRef.current = beginWarning(Date.now());
+  }, [recording]);
+
+  /**
+   * 低音量警告。
+   *
+   * 判定そのものは Backend が行い、ここは「何秒続いたら出すか」だけを見る。
+   * Backend / 文字起こしの停止は既存の無進捗ウォッチドッグの担当で、
+   * ここでは一切扱わない（誤検知の相互汚染を避ける）。
+   */
+  useEffect(() => {
+    if (!recording || !audioSettings.lowInputWarning) return;
+    const decision = updateWarning(
+      warningRef.current,
+      live.inputLevelState,
+      Date.now(),
+      thresholdMsFrom(audioSettings.lowInputWarningSeconds)
+    );
+    warningRef.current = decision.next;
+    if (decision.raise) {
+      setBanner(
+        warnNotice(`${WARNING_HEADINGS[decision.raise]}：${warningMessage(decision.raise)}`)
+      );
+    } else if (decision.clear) {
+      // 自分が出した警告だけを消す。他の通知は残す。
+      setBanner((prev) =>
+        prev && prev.kind === 'warn' && prev.message.includes('入力') ? null : prev
+      );
+    }
+  }, [recording, live.inputLevelState, audioSettings.lowInputWarning, audioSettings.lowInputWarningSeconds]);
+
+  /** メーターに出す入力モード。Backend が解決した値があればそれを優先する。 */
+  const meterMode = useMemo(() => {
+    if (live.resolvedInputMode) {
+      return {
+        mode: live.resolvedInputMode.mode as 'mic' | 'loopback' | 'custom',
+        isAuto: live.resolvedInputMode.isAuto
+      };
+    }
+    const resolved = resolveMode(audioSettings.inputMode, deviceLabel);
+    return { mode: resolved.mode, isAuto: resolved.isAuto };
+  }, [live.resolvedInputMode, audioSettings.inputMode, deviceLabel]);
+
+  const appliedGainDb = useMemo(() => {
+    const value = live.inputLevels?.gain_db;
+    return typeof value === 'number' ? value : null;
+  }, [live.inputLevels]);
 
   /** ウィンドウへ即時反映する（ライブプレビューと復元の共通経路）。失敗しても続行する。 */
   const applyOpacity = useCallback(
@@ -279,6 +376,10 @@ export default function App() {
           overlapSeconds,
           deviceId: deviceId || undefined,
           deviceLabel: deviceLabel || undefined,
+          // 0019: 入力モードとプリセット。Backend が補正と無音判定に使う。
+          // フォールバックで別デバイスが開いたときに引き直せるよう、map も渡す。
+          inputProfile: audioSettings,
+          inputProfiles: inputProfiles as Record<string, Record<string, unknown>>,
           outputFolder: session.session_dir,
           outputFilename: session.transcript_filename,
           writeToFile: true
@@ -310,6 +411,8 @@ export default function App() {
     overlapSeconds,
     deviceId,
     deviceLabel,
+    audioSettings,
+    inputProfiles,
     refreshMics
   ]);
 
@@ -604,15 +707,16 @@ export default function App() {
             <span className="mono">{formatElapsed(elapsedSec)}</span>
             <span className="ellipsis" title={`入力デバイス: ${live.deviceLabel}`}>入力: {live.deviceLabel}</span>
           </div>
+          {/* 0019: 入力レベル。色だけに頼らず記号と短い語でも状態を出す。
+              320px 幅でも 1 行に収まるようコンパクト表示にする。 */}
           <div className="status-line">
-            <span className="level-meter" title={`入力レベル(RMS)=${live.inputLevel.toFixed(4)}`}>
-              <span className="level-track">
-                <span
-                  className={`level-fill ${live.inputLevel < 0.001 && recording ? 'silent' : ''}`}
-                  style={{ width: `${Math.min(100, live.inputLevel * 400)}%` }}
-                />
-              </span>
-            </span>
+            <InputLevelMeter
+              view={meterView}
+              mode={meterMode.mode}
+              isAuto={meterMode.isAuto}
+              gainDb={appliedGainDb}
+              compact
+            />
           </div>
           {/* 0017: 録音状態をこの領域で最も目立つ 1 つの表示にまとめる。
               「録音」「中」に割れないよう nowrap。 */}
@@ -759,7 +863,10 @@ export default function App() {
       ) : null}
       <SettingsModal
         open={settingsOpen}
-        current={{ gptUrl, saveFolder, deviceId, deviceLabel, model, delayMode, windowOpacity }}
+        current={{
+          gptUrl, saveFolder, deviceId, deviceLabel, model, delayMode, windowOpacity,
+          audio: audioSettings, inputProfiles, showAdvancedAudio
+        }}
         onPreviewOpacity={applyOpacity}
         mics={mics}
         recording={recording}
@@ -780,6 +887,10 @@ export default function App() {
           noticeGateRef.current.reset();
           setModel(next.model);
           setDelayMode(next.delayMode);
+          // 0019
+          setAudioSettings(next.audio);
+          setInputProfiles(next.inputProfiles);
+          setShowAdvancedAudio(next.showAdvancedAudio);
         }}
         onClose={() => setSettingsOpen(false)}
       />

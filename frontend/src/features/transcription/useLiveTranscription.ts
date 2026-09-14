@@ -27,6 +27,12 @@ import {
   type LiveWarning,
   type StartOptions
 } from './liveTypes';
+import type { InputLevelState } from '../audio/lowVolumeWarning';
+import {
+  resolveProfileForActualDevice,
+  toBackendPayload,
+  type InputProfileSettings
+} from '../audio/inputProfile';
 
 import {
   FALLBACK_NOTICE,
@@ -68,6 +74,7 @@ type ServerMessage = {
     | 'warning'
     | 'metrics'
     | 'error'
+    | 'input_level_state'
     | 'log';
   result_id?: string;
   session_id?: string;
@@ -107,6 +114,12 @@ export interface LiveState {
   capturePath: CapturePath | null;
   logText: string;
   inputLevel: number;
+  /** 0019: Backend が判定した入力レベルの瞬時状態。 */
+  inputLevelState: InputLevelState;
+  /** 0019: Backend が返した入力レベルの詳細（メーターの補助表示に使う）。 */
+  inputLevels: Record<string, unknown> | null;
+  /** 0019: 解決された入力モード（auto の判定結果を含む）。 */
+  resolvedInputMode: { mode: string; detected: string; isAuto: boolean } | null;
   progress: LiveProgress;
   anomaly: LiveAnomaly | null;
   warning: LiveWarning | null;
@@ -139,6 +152,10 @@ export function useLiveTranscription(): LiveState {
   const [capturePath, setCapturePath] = useState<CapturePath | null>(null);
   const [logText, setLogText] = useState('');
   const [inputLevel, setInputLevel] = useState(0);
+  const [inputLevelState, setInputLevelState] = useState<InputLevelState>('ok');
+  const [inputLevels, setInputLevels] = useState<Record<string, unknown> | null>(null);
+  const [resolvedInputMode, setResolvedInputMode] =
+    useState<{ mode: string; detected: string; isAuto: boolean } | null>(null);
   const [progress, setProgress] = useState<LiveProgress>(EMPTY_PROGRESS);
   const [anomaly, setAnomaly] = useState<LiveAnomaly | null>(null);
   const [warning, setWarning] = useState<LiveWarning | null>(null);
@@ -151,6 +168,11 @@ export function useLiveTranscription(): LiveState {
   const rafRef = useRef<number | null>(null);
 
   const optionsRef = useRef<StartOptions | null>(null);
+  /**
+   * 実際に開けたデバイスで解決し直した入力プロファイル（0019）。
+   * 保存済みラベルではなく **これ** を Backend へ送る。
+   */
+  const effectiveProfileRef = useRef<{ settings: InputProfileSettings; deviceLabel: string } | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   // Backend が落ちて再起動した場合、再接続先は「別セッション」になる（レジストリは
   // プロセス内にあるため）。そのとき画面のテキストを失わないよう、
@@ -382,6 +404,17 @@ export function useLiveTranscription(): LiveState {
             appendLog('[RT] Backend が再起動していたため新しいセッションで続行します（既存の文字起こしは保持）');
           }
           sessionIdRef.current = data.session_id ?? null;
+          {
+            // 0019: Backend が解決した入力モード（auto の判定結果）を UI へ渡す。
+            const profile = data.input_profile as Record<string, unknown> | undefined;
+            if (profile) {
+              setResolvedInputMode({
+                mode: String(profile.mode ?? 'mic'),
+                detected: String(profile.detected_mode ?? 'mic'),
+                isAuto: String(profile.requested_mode ?? 'auto') === 'auto'
+              });
+            }
+          }
           setSavedPath(data.saved_path ?? null);
           setAudioPath(data.audio_path ?? null);
           reconnectAttemptRef.current = 0;
@@ -446,8 +479,21 @@ export function useLiveTranscription(): LiveState {
           finalResolveRef.current = null;
           break;
         }
+        case 'input_level_state': {
+          // 0019: 状態が変わったときだけ Backend が送ってくる。
+          setInputLevelState((data.state as InputLevelState) ?? 'ok');
+          setInputLevels((data.input_levels as Record<string, unknown>) ?? null);
+          break;
+        }
         case 'heartbeat': {
           lastHeartbeatAtRef.current = Date.now();
+          const levels = data.input_levels as Record<string, unknown> | undefined;
+          if (levels) {
+            setInputLevels(levels);
+            if (typeof levels.level_state === 'string') {
+              setInputLevelState(levels.level_state as InputLevelState);
+            }
+          }
           const processed = Number(data.processed_audio_seconds ?? 0);
           lastProcessedRef.current = updateProcessedMark(
             lastProcessedRef.current,
@@ -522,6 +568,15 @@ export function useLiveTranscription(): LiveState {
             chunk_seconds: options.chunkSeconds,
             overlap_seconds: options.overlapSeconds,
             write_to_file: options.writeToFile,
+            // 0019: 入力モードとプリセット。Backend が補正と無音判定に使う。
+            // **保存済みラベルではなく、実際に開けたデバイスで解決した値**を送る。
+            device_label: effectiveProfileRef.current?.deviceLabel ?? options.deviceLabel ?? '',
+            input_profile: effectiveProfileRef.current
+              ? toBackendPayload(
+                  effectiveProfileRef.current.settings,
+                  effectiveProfileRef.current.deviceLabel
+                )
+              : undefined,
             output_folder: options.outputFolder,
             output_filename: options.outputFilename,
             debug: Boolean(options.debug),
@@ -654,6 +709,31 @@ export function useLiveTranscription(): LiveState {
       streamRef.current = stream;
       const track = stream.getAudioTracks()[0];
       setDeviceLabel(track?.label || '既定入力');
+
+      // 0019: 実際に開けたデバイスでプリセットを解決し直す。
+      // 保存済みラベルの設定をそのまま使うと、フォールバック時に
+      // BlackHole 用の「補正なし」が本体マイクへ適用され、0019 が再発する。
+      if (opts.inputProfile) {
+        const resolvedProfile = resolveProfileForActualDevice(
+          opts.deviceLabel ?? '',
+          track?.label ?? '',
+          opts.inputProfile as InputProfileSettings,
+          (opts.inputProfiles ?? {}) as never
+        );
+        effectiveProfileRef.current = {
+          settings: resolvedProfile.settings,
+          deviceLabel: resolvedProfile.deviceLabel
+        };
+        if (resolvedProfile.relabeled) {
+          appendLog(
+            `[RT] 入力デバイスが変わったため設定を解決し直しました ` +
+              `(保存=${opts.deviceLabel || '未設定'} 実際=${track?.label || '不明'} ` +
+              `mode=${resolvedProfile.settings.inputMode})`
+          );
+        }
+      } else {
+        effectiveProfileRef.current = null;
+      }
 
       const onFault = (fault: CaptureFault) => {
         const reason: LiveErrorReason =
@@ -829,6 +909,9 @@ export function useLiveTranscription(): LiveState {
     capturePath,
     logText,
     inputLevel,
+    inputLevelState,
+    inputLevels,
+    resolvedInputMode,
     progress,
     anomaly,
     warning,

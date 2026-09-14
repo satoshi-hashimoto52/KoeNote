@@ -10,12 +10,25 @@ from typing import Dict
 
 import numpy as np
 
+from .audio_levels import ABSOLUTE_SILENCE_RMS, pcm16_to_float32, rms as _rms
 from .pcm_stream import BYTES_PER_SAMPLE, SAMPLE_RATE
 from .transcriber import resolve_ffmpeg_dir
 
 SUPPORTED_MODELS = {"tiny", "base", "small", "medium"}
 DEFAULT_MODEL = "small"
-MIN_RMS = 0.006
+
+# 0019: 固定 MIN_RMS = 0.006 は撤去した。
+#
+# 本体マイクで遠方の会話を拾うと全編が -48 dBFS 前後になり、実測ノイズフロア
+# 0.00081（-61.8 dBFS）の 7.4 倍にあたる 0.006 では、463 窓中 366 窓（79.0%）が
+# Whisper へ渡る前に破棄された（docs/issues/0019）。
+#
+# 代わりに使うのは
+#   1. ABSOLUTE_SILENCE_RMS: 無効入力・デジタル無音だけを弾く十分低い絶対下限
+#   2. 呼び出し側が渡す相対しきい値（ノイズフロア基準。既定は絶対下限と同じ）
+#   3. faster-whisper の vad_filter（Silero VAD）による実際の発話区間の切り出し
+# の 3 層。詳細は services/audio_levels.py を参照。
+DEFAULT_SILENCE_RMS = ABSOLUTE_SILENCE_RMS
 
 # segment の品質判定に使う閾値。model.transcribe へ渡す値と揃える。
 NO_SPEECH_THRESHOLD = 0.6
@@ -29,17 +42,37 @@ HALLUCINATION_PHRASES = {
     "あはは",
 }
 
+# 反復ハルシネーション検出。compression_ratio が閾値内でも、短い n-gram が
+# テキストの大半を占めるセグメントは異常反復とみなす（0019 で実測した
+# 「はい」×223 回のような列は compression_ratio 51.46 で捕まるが、
+# より短い反復は閾値内に収まることがある）。
+REPETITION_MIN_LENGTH = 24
+REPETITION_NGRAM_SIZES = (1, 2, 3, 4)
+REPETITION_COVERAGE = 0.6
+
 # realtime の推論パラメータ。wav 経路と PCM 経路で認識挙動を一致させるため 1 箇所に集約する
 # （片方だけ変えると同じ音声で結果が変わる）。
 # word_timestamps: 確定境界を word 単位で決めるために必須。
 #   segment 単位だと確定線をまたぐ segment のテキストが失われる
 #   （確定線は次 window の開始時刻と一致するため再評価の機会がない）。
 #   実測コスト +6〜7%（small / 10秒窓で 1.86s -> 1.96s）。
+# temperature: **スカラーにしてはいけない**（0019）。
+#   faster_whisper/transcribe.py は
+#     temperatures=(temperature if isinstance(temperature, (list, tuple)) else [temperature])
+#   としており、スカラーだと fallback ループが 1 周で終わる。
+#   その結果 compression_ratio_threshold を超えても再デコードされず、
+#   「はい」の反復のようなハルシネーションが確定テキストへそのまま入る
+#   （実測: compression_ratio 51.46 / 446 字。実会話 30 秒分が失われた）。
+#   tuple/list は faster-whisper 1.2.1 の型注釈
+#   Union[float, List[float], Tuple[float, ...]] で正式に受け付ける形式。
+#   fallback は閾値を割ったときだけ走るため、通常音声の速度・品質は変わらない。
+TRANSCRIBE_TEMPERATURES = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+
 TRANSCRIBE_KWARGS = {
     "language": "ja",
     "beam_size": 3,
     "vad_filter": True,
-    "temperature": 0,
+    "temperature": TRANSCRIBE_TEMPERATURES,
     "condition_on_previous_text": False,
     "no_speech_threshold": NO_SPEECH_THRESHOLD,
     "log_prob_threshold": LOGPROB_THRESHOLD,
@@ -114,21 +147,9 @@ def _convert_webm_to_wav(input_path: Path, output_path: Path) -> None:
         raise RuntimeError(f"音声chunk変換に失敗しました。{detail}".strip())
 
 
-def _pcm_rms(samples: np.ndarray) -> float:
-    """-1.0..1.0 に正規化済みの float 配列から RMS を求める。"""
-    if samples.size == 0:
-        return 0.0
-    return float(np.sqrt(np.mean(np.square(samples, dtype=np.float64))))
-
-
-def pcm16_to_float32(pcm_bytes: bytes) -> np.ndarray:
-    """PCM16LE を faster-whisper がそのまま受け取れる float32 配列にする。"""
-    remainder = len(pcm_bytes) % BYTES_PER_SAMPLE
-    if remainder:
-        pcm_bytes = pcm_bytes[: len(pcm_bytes) - remainder]
-    if not pcm_bytes:
-        return np.zeros(0, dtype=np.float32)
-    return np.frombuffer(pcm_bytes, dtype="<i2").astype(np.float32) / 32768.0
+# レベル計算は services.audio_levels に一本化する（0019）。
+# ここに同じ実装を置くと、しきい値の基準がモジュールごとにずれる。
+_pcm_rms = _rms
 
 
 def _calculate_wav_rms(wav_path: Path) -> float:
@@ -149,6 +170,28 @@ def _is_hallucination_text(text: str) -> bool:
     if not normalized:
         return False
     return any(phrase in normalized for phrase in HALLUCINATION_PHRASES)
+
+
+def is_repetitive_text(text: str) -> bool:
+    """短い n-gram がテキストの大半を占める＝異常反復か（0019）。
+
+    temperature fallback を有効化しても、fallback 後の候補がすべて反復に
+    なることはありうる。確定テキストへ入れないための最終防壁として使う。
+    """
+    normalized = "".join(str(text or "").split())
+    if len(normalized) < REPETITION_MIN_LENGTH:
+        return False
+    for n in REPETITION_NGRAM_SIZES:
+        if len(normalized) < n * 2:
+            continue
+        counts: Dict[str, int] = {}
+        for i in range(len(normalized) - n + 1):
+            gram = normalized[i : i + n]
+            counts[gram] = counts.get(gram, 0) + 1
+        top = max(counts.values())
+        if top * n > REPETITION_COVERAGE * len(normalized):
+            return True
+    return False
 
 
 def _debug_chunk_dir() -> Path:
@@ -224,14 +267,41 @@ def _collect_segments(segments) -> tuple[str, list, list]:
         if _is_hallucination_text(text):
             dropped_reasons.append("hallucination_phrase")
             continue
+        # 0019: fallback を通しても反復のままなら確定テキストへ入れない。
+        if is_repetitive_text(text):
+            dropped_reasons.append(f"repetitive_segment(len={len(text)})")
+            continue
         accepted_texts.append(text)
         accepted_segments.append({
             "start": float(getattr(segment, "start", 0.0) or 0.0),
             "end": float(getattr(segment, "end", 0.0) or 0.0),
             "text": text,
             "words": _extract_words(segment),
+            # transcript_segments.json へ残す認識品質指標（0019）。
+            "avg_logprob": avg_logprob,
+            "no_speech_prob": no_speech_prob,
+            "compression_ratio": compression_ratio,
         })
     return "".join(accepted_texts).strip(), accepted_segments, dropped_reasons
+
+
+def summarize_quality(segments: list) -> dict:
+    """窓内の採用セグメントから、最も悪い側の品質指標を拾う。
+
+    確定は word 単位で行うため segment と 1 対 1 に対応しない。
+    窓単位の代表値として「一番怪しい値」を残すことで、事後解析で
+    疑わしい区間を絞り込めるようにする。
+    """
+    if not segments:
+        return {}
+    logprobs = [s["avg_logprob"] for s in segments if s.get("avg_logprob") is not None]
+    no_speech = [s["no_speech_prob"] for s in segments if s.get("no_speech_prob") is not None]
+    ratios = [s["compression_ratio"] for s in segments if s.get("compression_ratio") is not None]
+    return {
+        "avg_logprob": min(logprobs) if logprobs else None,
+        "no_speech_prob": max(no_speech) if no_speech else None,
+        "compression_ratio": max(ratios) if ratios else None,
+    }
 
 
 def _result(text, segments, model_key, rms, dropped_reasons, debug_path=None, debug_wav_path=None) -> dict:
@@ -242,12 +312,19 @@ def _result(text, segments, model_key, rms, dropped_reasons, debug_path=None, de
         "rms": rms,
         "skipped": not bool(text),
         "skip_reason": ", ".join(dropped_reasons) if dropped_reasons else "",
+        # 0019: 反復ハルシネーションで破棄した件数。診断へ計上する。
+        "repetitive_dropped": sum(1 for r in dropped_reasons if r.startswith("repetitive_segment")),
+        "quality": summarize_quality(segments),
+        # 推論はしたが採用テキストが 0 だった = Silero VAD/品質判定で発話なし。
+        "no_speech": not bool(text),
+        "level_skipped": False,
         "debug_path": debug_path,
         "debug_wav_path": debug_wav_path,
     }
 
 
-def _skipped_result(model_key, rms, reason, debug_path=None, debug_wav_path=None) -> dict:
+def _skipped_result(model_key, rms, reason, debug_path=None, debug_wav_path=None,
+                    level_skipped: bool = True) -> dict:
     return {
         "text": "",
         "segments": [],
@@ -255,6 +332,11 @@ def _skipped_result(model_key, rms, reason, debug_path=None, debug_wav_path=None
         "rms": rms,
         "skipped": True,
         "skip_reason": reason,
+        "repetitive_dropped": 0,
+        "quality": {},
+        "no_speech": False,
+        # レベル判定で推論そのものを行わなかったか（vad_silence とは別に数える）。
+        "level_skipped": level_skipped,
         "debug_path": debug_path,
         "debug_wav_path": debug_wav_path,
     }
@@ -265,12 +347,19 @@ def transcribe_pcm16(
     model_name: str,
     debug_save: bool = False,
     sample_rate: int = SAMPLE_RATE,
+    silence_rms: float = DEFAULT_SILENCE_RMS,
+    has_speech: bool = True,
 ) -> dict:
     """PCM16LE mono を直接 faster-whisper へ渡す realtime 経路。
 
     faster-whisper は ndarray をそのまま受け取れる（ndarray 以外のときだけ内部で
     decode_audio を呼ぶ）ので、一時 wav も ffmpeg も不要。1 窓の処理コストは
     録音の長さに依存しない。
+
+    ``has_speech`` は呼び出し側（LiveSession）がフレーム単位の相対判定で決める。
+    **窓平均 RMS で無音判定してはいけない**（0019）。窓平均は発話の合間の無音を
+    含むためノイズフロアとの比が小さく、相対化しても実測でスキップ率 85.7% に
+    達する。ここで見るのは無効入力を弾く絶対下限だけにする。
     """
     model_key = (model_name or DEFAULT_MODEL).strip().lower()
     samples = pcm16_to_float32(pcm_bytes)
@@ -279,8 +368,16 @@ def transcribe_pcm16(
 
     rms = _pcm_rms(samples)
     debug_wav_path = _write_debug_pcm(pcm_bytes, sample_rate) if debug_save else None
-    if rms < MIN_RMS:
-        return _skipped_result(model_key, rms, f"low_rms<{MIN_RMS}", debug_wav_path=debug_wav_path)
+    threshold = max(float(silence_rms), 0.0)
+    if rms < threshold:
+        return _skipped_result(
+            model_key, rms, f"below_absolute_silence<{threshold:g}",
+            debug_wav_path=debug_wav_path,
+        )
+    if not has_speech:
+        return _skipped_result(
+            model_key, rms, "no_speech_frame_in_window", debug_wav_path=debug_wav_path
+        )
 
     model = _load_model(model_key)
     segments, _info = model.transcribe(samples, **TRANSCRIBE_KWARGS)
@@ -288,7 +385,8 @@ def transcribe_pcm16(
     return _result(text, accepted, model_key, rms, dropped, debug_wav_path=debug_wav_path)
 
 
-def transcribe_audio_chunk(audio_bytes: bytes, mime_type: str, model_name: str, debug_save: bool = False) -> dict:
+def transcribe_audio_chunk(audio_bytes: bytes, mime_type: str, model_name: str, debug_save: bool = False,
+                           silence_rms: float = DEFAULT_SILENCE_RMS) -> dict:
     if not audio_bytes:
         return _skipped_result(model_name or DEFAULT_MODEL, 0.0, "empty_chunk")
 
@@ -304,8 +402,11 @@ def transcribe_audio_chunk(audio_bytes: bytes, mime_type: str, model_name: str, 
         debug_path = _save_debug_file(input_path, suffix) if debug_save else None
         debug_wav_path = _save_debug_file(wav_path, ".wav") if debug_save else None
 
-        if rms < MIN_RMS:
-            return _skipped_result(model_key, rms, f"low_rms<{MIN_RMS}", debug_path, debug_wav_path)
+        threshold = max(float(silence_rms), 0.0)
+        if rms < threshold:
+            return _skipped_result(
+                model_key, rms, f"below_absolute_silence<{threshold:g}", debug_path, debug_wav_path
+            )
 
         model = _load_model(model_key)
         segments, _info = model.transcribe(str(wav_path), **TRANSCRIBE_KWARGS)
@@ -313,15 +414,19 @@ def transcribe_audio_chunk(audio_bytes: bytes, mime_type: str, model_name: str, 
         return _result(text, accepted, model_key, rms, dropped, debug_path, debug_wav_path)
 
 
-def transcribe_wav_file(wav_path: Path, model_name: str, debug_save: bool = False) -> dict:
+def transcribe_wav_file(wav_path: Path, model_name: str, debug_save: bool = False,
+                        silence_rms: float = DEFAULT_SILENCE_RMS) -> dict:
     model_key = (model_name or DEFAULT_MODEL).strip().lower()
     if not wav_path.is_file() or wav_path.stat().st_size == 0:
         return _skipped_result(model_key, 0.0, "empty_wav")
 
     rms = _calculate_wav_rms(wav_path)
     debug_wav_path = _save_debug_file(wav_path, ".wav") if debug_save else None
-    if rms < MIN_RMS:
-        return _skipped_result(model_key, rms, f"low_rms<{MIN_RMS}", debug_wav_path=debug_wav_path)
+    threshold = max(float(silence_rms), 0.0)
+    if rms < threshold:
+        return _skipped_result(
+            model_key, rms, f"below_absolute_silence<{threshold:g}", debug_wav_path=debug_wav_path
+        )
 
     model = _load_model(model_key)
     segments, _info = model.transcribe(str(wav_path), **TRANSCRIBE_KWARGS)

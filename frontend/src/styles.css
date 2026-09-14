@@ -939,3 +939,167 @@ button:focus-visible {
   .status-times { gap: 3px 8px; }
   .field { gap: 4px; }
 }
+
+/* --- 入力レベルメーターと入力テスト（0019）---
+   320px 幅を壊さないことが最優先。メーターは 1 行に収め、
+   状態は色だけでなく記号（—/▽/●/▲）と短い語でも示す。 */
+.input-level {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+}
+.input-level-state {
+  flex: 0 0 auto;
+  width: 14px;
+  text-align: center;
+  font-size: 11px;
+  line-height: 1;
+}
+.input-level-bar {
+  flex: 1 1 auto;
+  min-width: 32px;
+  height: 8px;
+  background: var(--field-bg);
+  border: 1px solid var(--field-border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.input-level-fill {
+  display: block;
+  height: 100%;
+  transition: width 0.1s linear;
+}
+/* 色は補助。記号と文字でも同じ情報が読めるようにしてある。 */
+.input-level-silent { color: var(--muted); background: var(--muted); }
+.input-level-low { color: var(--warn); background: var(--warn); }
+.input-level-good { color: var(--success); background: var(--success); }
+.input-level-loud { color: var(--danger, var(--warn)); background: var(--danger, var(--warn)); }
+.input-level-state.input-level-silent,
+.input-level-state.input-level-low,
+.input-level-state.input-level-good,
+.input-level-state.input-level-loud { background: transparent; }
+.input-level-text {
+  flex: 0 0 auto;
+  display: inline-flex;
+  gap: 6px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.input-level-db { color: var(--muted); }
+.input-level-mode {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 96px;
+}
+.input-level-gain { margin-left: 4px; }
+/* 320px では数値と入力モードを落とし、バーと状態記号だけを残す。 */
+@media (max-width: 380px) {
+  .input-level-db { display: none; }
+  .input-level-mode { max-width: 56px; }
+}
+
+/* --- 設定: 入力音声セクション（0019）--- */
+.settings-section {
+  border-top: 1px solid var(--field-border);
+  padding-top: 10px;
+  margin-bottom: 12px;
+  min-width: 0;
+}
+.settings-section-title {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.settings-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.settings-check > input { width: auto; }
+.settings-advanced {
+  border-left: 2px solid var(--field-border);
+  padding-left: 10px;
+  margin-top: 8px;
+}
+.btn-link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.btn-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* --- 入力テスト（0019）--- */
+.calibration-modal { max-width: 420px; }
+.calibration-sentence {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--field-bg);
+  border: 1px solid var(--field-border);
+  border-radius: 6px;
+  padding: 8px;
+  margin: 8px 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.calibration-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  min-width: 0;
+}
+.calibration-countdown { flex: 0 0 auto; font-size: 12px; }
+.calibration-bar {
+  flex: 1 1 auto;
+  min-width: 40px;
+  height: 6px;
+  background: var(--field-bg);
+  border: 1px solid var(--field-border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.calibration-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.1s linear;
+}
+.calibration-verdict {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  border-radius: 6px;
+  margin: 0 0 10px;
+  font-size: 12px;
+}
+.calibration-rows { margin: 8px 0; }
+.calibration-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--field-border);
+  font-size: 12px;
+  min-width: 0;
+}
+.calibration-row > dt { color: var(--muted); min-width: 0; }
+.calibration-row > dd { margin: 0; white-space: nowrap; }
+/* 320px では項目名と値を 2 行に分けて、どちらも省略しない。 */
+@media (max-width: 380px) {
+  .calibration-row { flex-direction: column; gap: 0; }
+  .calibration-row > dd { align-self: flex-end; }
+  .calibration-modal .modal-actions { flex-wrap: wrap; }
+}
+.hint-ok { color: var(--success); }

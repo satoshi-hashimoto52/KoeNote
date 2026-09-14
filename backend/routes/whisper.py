@@ -9,9 +9,12 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile, WebSocket,
 from pydantic import BaseModel
 from typing import Optional
 
+from pathlib import Path
+
 from services import session_store
 from services.live_registry import registry
 from services.live_session import LiveSession, LiveSessionConfig
+from services.word_commit import DegradeReason
 from services.pcm_stream import BYTES_PER_SAMPLE, SAMPLE_RATE
 from services.transcriber import ALLOWED_EXTENSIONS, TranscriptionStageError, run_transcribe, save_upload_file
 from services.wav_recorder import recorder_registry
@@ -497,6 +500,8 @@ async def _heartbeat(session: LiveSession, outbox: _Outbox, stop_event: asyncio.
                 "server_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "pid": os.getpid(),
                 **session.progress_snapshot(),
+                # 0019: 入力レベルの状態。UI のメーターと低音量警告が使う。
+                "input_levels": session.level_snapshot(),
             }
         )
         try:
@@ -574,6 +579,51 @@ async def _emit_window(session: LiveSession, outbox: _Outbox, result: dict, infe
         )
 
 
+def _session_dir_of(session: LiveSession) -> Optional[str]:
+    """セッションフォルダ。transcript.txt の置き場所がそのまま会議フォルダ。"""
+    if not session.saved_path:
+        return None
+    return str(Path(session.saved_path).parent)
+
+
+def _write_diagnostics(session: LiveSession, message: str) -> None:
+    """diagnostics.log へ 1 行書く。失敗しても録音は止めない（0019）。
+
+    毎チャンクは書かない。60 秒ごとの集計と状態変化時だけ呼ぶこと。
+    """
+    directory = _session_dir_of(session)
+    if not directory:
+        return
+    try:
+        session_store.append_diagnostics(directory, message)
+    except OSError as exc:
+        print(f"[WS] WARN diagnostics write failed: {exc}", flush=True)
+
+
+async def _report_input_levels(session: LiveSession, outbox: _Outbox) -> None:
+    """入力レベルの集計と状態変化を診断へ残し、状態変化は UI へも伝える。"""
+    summary = session.maybe_report_levels()
+    if summary:
+        await asyncio.to_thread(_write_diagnostics, session, summary)
+
+    state = session.evaluate_level_state(
+        window_seconds=session.config.input_profile.low_input_warning_seconds
+    )
+    line = session.set_level_state(state)
+    if line is None:
+        return
+    await asyncio.to_thread(_write_diagnostics, session, line)
+    if state not in ("ok", "silent_ok"):
+        session.log_degraded(DegradeReason.LOW_INPUT_LEVEL, state=state)
+    await outbox.put(
+        {
+            "type": "input_level_state",
+            "state": state,
+            "input_levels": session.level_snapshot(),
+        }
+    )
+
+
 async def _inference_driver(
     session: LiveSession,
     outbox: _Outbox,
@@ -619,6 +669,7 @@ async def _inference_driver(
 
         session.advance_cursor(plan[1])
         await _emit_window(session, outbox, result, inference_ms)
+        await _report_input_levels(session, outbox)
 
         if session.degraded and not warned_degraded:
             warned_degraded = True
@@ -730,7 +781,8 @@ async def live_transcribe(websocket: WebSocket):
             f"[WS] {'resumed' if resumed else 'ready'} session={session.session_id} "
             f"model={session.config.model} chunk={session.config.chunk_seconds}s "
             f"overlap={session.config.overlap_seconds}s mode={session.config.send_mode} "
-            f"sr={session.config.sample_rate} saved={session.saved_path}",
+            f"sr={session.config.sample_rate} saved={session.saved_path} "
+            f"input_mode={session.config.input_profile.mode}",
             flush=True,
         )
         await websocket.send_json(
@@ -746,8 +798,20 @@ async def live_transcribe(websocket: WebSocket):
                 "chunk_seconds": session.config.chunk_seconds,
                 "overlap_seconds": session.config.overlap_seconds,
                 "heartbeat_interval_seconds": HEARTBEAT_INTERVAL_SECONDS,
+                # 0019: 解決された入力モード（auto の判定結果を含む）を UI へ返す。
+                "input_profile": session.config.input_profile.as_dict(),
             }
         )
+        # 0019: どの入力モード・プリセットで録ったかを最初に 1 行残す。
+        # 事後解析でレベル異常を追うとき、これが無いと前提が分からない。
+        if not resumed:
+            await asyncio.to_thread(
+                _write_diagnostics,
+                session,
+                f"{session.config.input_profile.summary()} "
+                f"device={session.config.input_profile.device_label or 'unknown'}",
+            )
+
         if resumed:
             # 差分の基準がずれないよう、再接続直後は全文を渡す。
             await websocket.send_json(
@@ -858,6 +922,11 @@ async def live_transcribe(websocket: WebSocket):
                 if not audio_bytes:
                     continue
                 # 受信側は追記だけ。ここをブロックさせないことが全体の前提。
+                #
+                # 0019 の不変条件: **recorder へ渡すのは補正前の生バイト。**
+                # 音量補正は session.append_pcm の中だけで行い、解析用リング
+                # バッファにしか効かない。recording.wav は常に無補正で残す
+                # （事後の再解析・再救済のために原本を壊さない）。
                 session.append_pcm(audio_bytes)
                 if recorder is not None:
                     recorder.append(audio_bytes)

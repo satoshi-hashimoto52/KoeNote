@@ -79,6 +79,23 @@ export function postDiagnostics(sessionDir: string, message: string): Promise<{ 
   return postJson('/api/session/diagnostics', { session_dir: sessionDir, message });
 }
 
+/**
+ * 入力テスト（キャリブレーション）の解析（0019）。
+ *
+ * 判定は Backend が**録音時と同じコード**で行う。UI 側に判定を二重実装すると
+ * 「テストでは良好、実際は落ちる」というずれが出る。
+ * 送った PCM は Backend でも保存されない（メモリ上でのみ扱う）。
+ */
+export function analyzeInput(payload: {
+  speech_pcm: string;
+  noise_pcm?: string;
+  device_label?: string;
+  input_profile?: Record<string, unknown>;
+  sample_rate?: number;
+}): Promise<Record<string, unknown>> {
+  return postJson('/api/audio/analyze', payload);
+}
+
 /** 強制終了でヘッダが古くなった recording.wav を実ファイル長から復旧する。 */
 export function repairAudio(
   sessionDir: string

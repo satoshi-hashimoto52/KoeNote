@@ -14,6 +14,22 @@ import {
 } from './settingsDraft';
 import { selectValueForMics } from './deviceNotice';
 import {
+  INPUT_MODES,
+  INPUT_MODE_HINTS,
+  INPUT_MODE_LABELS,
+  MAX_GAIN_DB,
+  MAX_WARNING_SECONDS,
+  MIN_WARNING_SECONDS,
+  describeResolution,
+  normalizeProfile,
+  profileForDevice,
+  resolveMode,
+  type GainMode,
+  type InputMode,
+  type SilenceMode
+} from '../features/audio/inputProfile';
+import { CalibrationModal } from './CalibrationModal';
+import {
   MAX_WINDOW_OPACITY,
   MIN_WINDOW_OPACITY,
   WINDOW_OPACITY_STEP,
@@ -36,6 +52,12 @@ interface Props {
   onPreviewOpacity: (value: number) => void;
 }
 
+/** 数値入力の共通処理。空欄や不正値で NaN を書き込まない。 */
+function numberOr(value: string, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 /**
  * マイGPT URL・保存先・入力デバイス・モデル・遅延モードの設定（0015）。
  * 5 項目をひとまとまりの下書きとして扱い、保存を押したときだけ反映する。
@@ -53,6 +75,7 @@ export function SettingsModal({
 }: Props) {
   const [draft, setDraft] = useState<CaptureSettings>(() => createDraft(current));
   const [errors, setErrors] = useState<DraftErrors>({});
+  const [calibrationOpen, setCalibrationOpen] = useState(false);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   // 0018: モーダルを開いた時点の不透明度。キャンセル / Escape / 背景クリックで戻す。
   const openedOpacityRef = useRef<number>(current.windowOpacity);
@@ -140,6 +163,10 @@ export function SettingsModal({
 
   if (!open) return null;
 
+  // 0019: 自動判定の結果は常に UI へ出す（ユーザーが手動で上書きできることが前提）。
+  const resolution = resolveMode(draft.audio.inputMode, draft.deviceLabel);
+  const isCustom = draft.audio.inputMode === 'custom';
+
   return (
     <div className="modal-backdrop" onClick={close}>
       <div
@@ -212,7 +239,16 @@ export function SettingsModal({
               const id = e.target.value;
               // ラベルも一緒に保存する。origin が変わって ID が無効になっても引き当て直せる。
               const label = mics.find((m) => m.deviceId === id)?.label ?? '';
-              setDraft((d) => updateDraft(updateDraft(d, 'deviceId', id), 'deviceLabel', label));
+              setDraft((d) => {
+                // 0019: デバイスを変えたら、そのデバイス用のプリセットを解決し直す。
+                // 旧デバイスの設定（BlackHole 用の「補正なし」など）を持ち込まない。
+                const audio = profileForDevice(d.inputProfiles, label);
+                return updateDraft(
+                  updateDraft(updateDraft(d, 'deviceId', id), 'deviceLabel', label),
+                  'audio',
+                  audio
+                );
+              });
             }}
           >
             <option value="">既定の入力デバイス</option>
@@ -220,6 +256,232 @@ export function SettingsModal({
               <option key={m.deviceId || i} value={m.deviceId}>{m.label || `マイク ${i + 1}`}</option>
             ))}
           </select>
+        </div>
+
+        {/* 0019: 入力音声。一般利用者向けの「基本」と、RMS などを扱う「詳細」を分ける。 */}
+        <div className="settings-section">
+          <h3 className="settings-section-title">入力音声</h3>
+
+          <div className="settings-field">
+            <label htmlFor="set-input-mode">入力モード</label>
+            <select
+              id="set-input-mode"
+              value={draft.audio.inputMode}
+              disabled={recording}
+              aria-label="入力モード"
+              onChange={(e) => {
+                const mode = e.target.value as InputMode;
+                setDraft((d) =>
+                  updateDraft(d, 'audio', normalizeProfile(
+                    { ...d.audio, inputMode: mode }, d.deviceLabel
+                  ))
+                );
+              }}
+            >
+              {INPUT_MODES.map((mode) => (
+                <option key={mode} value={mode}>{INPUT_MODE_LABELS[mode]}</option>
+              ))}
+            </select>
+            {/* 自動判定の結果は必ず見せる。ユーザーが手動で上書きできることが前提。 */}
+            <p className="hint">{describeResolution(resolution, draft.deviceLabel)}</p>
+            <p className="hint">{INPUT_MODE_HINTS[draft.audio.inputMode]}</p>
+          </div>
+
+          <div className="settings-field">
+            <label className="settings-check">
+              <input
+                type="checkbox"
+                checked={draft.audio.lowInputWarning}
+                disabled={recording}
+                onChange={(e) =>
+                  setDraft((d) =>
+                    updateDraft(d, 'audio', { ...d.audio, lowInputWarning: e.target.checked })
+                  )
+                }
+              />
+              <span>入力音量が低いときに警告する</span>
+            </label>
+          </div>
+
+          <div className="settings-field">
+            <button
+              type="button"
+              className="btn-ghost"
+              disabled={recording}
+              onClick={() => setCalibrationOpen(true)}
+            >
+              入力テストを実行
+            </button>
+            <p className="hint">
+              最も遠い席からの声が文字起こしできるかを測定します（約30秒）。
+              録音セッションは作成されず、テスト音声も保存されません。
+            </p>
+          </div>
+
+          <button
+            type="button"
+            className="btn-link"
+            aria-expanded={draft.showAdvancedAudio}
+            onClick={() =>
+              setDraft((d) => updateDraft(d, 'showAdvancedAudio', !d.showAdvancedAudio))
+            }
+          >
+            {draft.showAdvancedAudio ? '詳細設定を隠す' : '詳細設定を表示'}
+          </button>
+
+          {draft.showAdvancedAudio ? (
+            <div className="settings-advanced">
+              <p className="hint">
+                以下はカスタムモードでのみ変更できます。数値は dBFS
+                （デジタルのフルスケール基準）であり、騒音計の dB SPL とは異なります。
+              </p>
+
+              <div className="settings-field">
+                <label htmlFor="set-gain-mode">音量補正</label>
+                <select
+                  id="set-gain-mode"
+                  value={draft.audio.gainMode}
+                  disabled={recording || !isCustom}
+                  aria-label="音量補正"
+                  onChange={(e) =>
+                    setDraft((d) =>
+                      updateDraft(d, 'audio', { ...d.audio, gainMode: e.target.value as GainMode })
+                    )
+                  }
+                >
+                  <option value="auto">自動</option>
+                  <option value="none">なし（0dB）</option>
+                  <option value="manual">手動</option>
+                </select>
+              </div>
+
+              <div className="settings-field">
+                <div className="opacity-head">
+                  <label htmlFor="set-manual-gain">手動ゲイン</label>
+                  <span className="opacity-value mono">
+                    +{draft.audio.manualGainDb.toFixed(0)} dB
+                  </span>
+                </div>
+                <input
+                  id="set-manual-gain"
+                  type="range"
+                  className="opacity-range"
+                  min={0}
+                  max={MAX_GAIN_DB}
+                  step={1}
+                  value={draft.audio.manualGainDb}
+                  disabled={recording || !isCustom || draft.audio.gainMode !== 'manual'}
+                  aria-label="手動ゲイン（dB）"
+                  onChange={(e) =>
+                    setDraft((d) =>
+                      updateDraft(d, 'audio', {
+                        ...d.audio,
+                        manualGainDb: numberOr(e.target.value, 0)
+                      })
+                    )
+                  }
+                />
+              </div>
+
+              <div className="settings-field">
+                <div className="opacity-head">
+                  <label htmlFor="set-max-gain">最大ゲイン</label>
+                  <span className="opacity-value mono">
+                    +{draft.audio.maxGainDb.toFixed(0)} dB
+                  </span>
+                </div>
+                <input
+                  id="set-max-gain"
+                  type="range"
+                  className="opacity-range"
+                  min={0}
+                  max={MAX_GAIN_DB}
+                  step={1}
+                  value={draft.audio.maxGainDb}
+                  disabled={recording || !isCustom}
+                  aria-label="最大ゲイン（dB）"
+                  onChange={(e) =>
+                    setDraft((d) =>
+                      updateDraft(d, 'audio', {
+                        ...d.audio,
+                        maxGainDb: numberOr(e.target.value, MAX_GAIN_DB)
+                      })
+                    )
+                  }
+                />
+                <p className="hint">自動補正の上限。ノイズを持ち上げすぎないための安全弁です。</p>
+              </div>
+
+              <div className="settings-field">
+                <label htmlFor="set-silence-mode">無音判定</label>
+                <select
+                  id="set-silence-mode"
+                  value={draft.audio.silenceMode}
+                  disabled={recording || !isCustom}
+                  aria-label="無音判定"
+                  onChange={(e) =>
+                    setDraft((d) =>
+                      updateDraft(d, 'audio', {
+                        ...d.audio,
+                        silenceMode: e.target.value as SilenceMode
+                      })
+                    )
+                  }
+                >
+                  <option value="relative">自動（ノイズフロア基準の相対判定）</option>
+                  <option value="absolute">絶対下限のみ</option>
+                  <option value="manual">手動しきい値</option>
+                </select>
+              </div>
+
+              <div className="settings-field">
+                <label htmlFor="set-silence-rms">手動しきい値（RMS）</label>
+                <input
+                  id="set-silence-rms"
+                  type="number"
+                  min={0}
+                  max={0.05}
+                  step={0.0001}
+                  value={draft.audio.manualSilenceRms}
+                  disabled={recording || !isCustom || draft.audio.silenceMode !== 'manual'}
+                  aria-label="手動しきい値（RMS）"
+                  onChange={(e) =>
+                    setDraft((d) =>
+                      updateDraft(d, 'audio', {
+                        ...d.audio,
+                        manualSilenceRms: numberOr(e.target.value, 0.0002)
+                      })
+                    )
+                  }
+                />
+                <p className="hint">
+                  既定 0.0002（-74 dBFS）。これより大きくすると遠い話者を取りこぼします。
+                </p>
+              </div>
+
+              <div className="settings-field">
+                <label htmlFor="set-warn-seconds">警告までの継続時間（秒）</label>
+                <input
+                  id="set-warn-seconds"
+                  type="number"
+                  min={MIN_WARNING_SECONDS}
+                  max={MAX_WARNING_SECONDS}
+                  step={1}
+                  value={draft.audio.lowInputWarningSeconds}
+                  disabled={recording}
+                  aria-label="警告までの継続時間（秒）"
+                  onChange={(e) =>
+                    setDraft((d) =>
+                      updateDraft(d, 'audio', {
+                        ...d.audio,
+                        lowInputWarningSeconds: numberOr(e.target.value, 20)
+                      })
+                    )
+                  }
+                />
+              </div>
+            </div>
+          ) : null}
         </div>
 
         <div className="settings-field">
@@ -285,6 +547,15 @@ export function SettingsModal({
           <button type="button" className="btn-ghost" onClick={close}>キャンセル</button>
         </div>
       </div>
+
+      <CalibrationModal
+        open={calibrationOpen}
+        deviceId={draft.deviceId}
+        deviceLabel={draft.deviceLabel}
+        settings={draft.audio}
+        onClose={() => setCalibrationOpen(false)}
+        onApply={(next) => setDraft((d) => updateDraft(d, 'audio', next))}
+      />
     </div>
   );
 }

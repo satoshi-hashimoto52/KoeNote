@@ -128,4 +128,23 @@ export interface StartOptions {
   outputFilename: string;
   writeToFile: boolean;
   debug?: boolean;
+  /**
+   * 入力モードとプリセット（0019）。Backend が音量補正と無音判定に使う。
+   * 省略すると Backend 側で `auto` として解決される。
+   */
+  inputProfile?: {
+    inputMode: string;
+    gainMode: string;
+    manualGainDb: number;
+    maxGainDb: number;
+    silenceMode: string;
+    manualSilenceRms: number;
+    lowInputWarning: boolean;
+    lowInputWarningSeconds: number;
+  };
+  /**
+   * デバイスラベル -> 設定（0019）。
+   * 実際に開けたデバイスが保存済みと異なるとき、ここから引き直す。
+   */
+  inputProfiles?: Record<string, Record<string, unknown>>;
 }

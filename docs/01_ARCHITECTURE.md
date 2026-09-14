@@ -124,10 +124,28 @@ sequenceDiagram
 | ファイル | 定数 |
 |---|---|
 | `transcript.txt` | `TRANSCRIPT_FILENAME` |
-| `transcript_segments.json` | `SEGMENTS_FILENAME` |
+| `transcript_segments.jsonl` | `segments_writer.SEGMENTS_JSONL_FILENAME`（0019） |
+| `transcript_segments.json` | `SEGMENTS_FILENAME` / `segments_writer.SEGMENTS_FILENAME` |
 | `session.json` | `SESSION_FILENAME` |
 | `diagnostics.log` | `DIAGNOSTICS_FILENAME` |
-| `audio/recording.wav` | `AUDIO_DIRNAME` / `RAW_AUDIO_FILENAME` |
+| `audio/recording.wav` | `AUDIO_DIRNAME` / `RAW_AUDIO_FILENAME`（**無補正の生音声**、0019） |
+
+### 音声の 2 系統（0019）
+
+受信した PCM は 2 つの経路へ分かれ、**補正されるのは解析側だけ**です。
+
+```
+WebSocket binary (生 PCM16LE)
+  ├─ recorder.append(raw)            -> audio/recording.wav   （無補正・原本）
+  └─ session.append_pcm(raw)
+        └─ AdaptiveGain.process()    -> PcmRingBuffer         （補正済み・解析用）
+              └─ transcribe_pcm16()  -> faster-whisper（vad_filter は補正後を見る）
+```
+
+`AdaptiveGain.process()` は入力と同じサンプル数を返します。
+フレーム境界でバッファリングすると `session.pcm.total_samples`
+（= `server_total_samples`）がクライアントの送信済みサンプル数から遅れ、
+再接続時に誤った `gap` が挿入されて絶対時刻がずれるためです。
 
 ## API 構成
 
